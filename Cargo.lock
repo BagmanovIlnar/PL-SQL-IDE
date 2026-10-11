@@ -3033,6 +3033,7 @@ dependencies = [
  "directories",
  "iced",
  "iced_aw",
+ "iced_fonts",
  "keyring",
  "oracle",
  "serde",

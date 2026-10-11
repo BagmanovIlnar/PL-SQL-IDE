@@ -3,6 +3,7 @@
 pub mod connection_profile;
 pub mod db_kind;
 pub mod error;
+pub mod object_metadata;
 pub mod postgres_spike;
 
 #[cfg(feature = "oracle")]

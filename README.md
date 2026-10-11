@@ -16,8 +16,8 @@ Product plan: [`plan.md`](./plan.md)
 
 Phase 0 validates the technology gate:
 
-- iced application window
-- editor load of ~100k lines
+- iced application window with ribbon shell
+- SQL editor with completion and line numbers
 - PostgreSQL connect / query / cancel spike
 - Oracle spike behind `--features oracle`
 - CI matrix for Linux, Windows and macOS
@@ -44,9 +44,9 @@ cargo run
 
 In the app:
 
-1. Click **Load 100k lines** to exercise the editor gate.
-2. Paste a PostgreSQL URL and click **Run spike**.
-3. Optionally enable **Cancel demo** to cancel `pg_sleep`.
+1. Select a connection in **Connections**.
+2. Edit SQL in the worksheet and use **Session → Execute**.
+3. Change theme under **Settings** if needed.
 
 ## Oracle feature
 

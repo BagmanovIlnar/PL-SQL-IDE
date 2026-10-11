@@ -68,6 +68,21 @@ impl WindowKind {
         }
     }
 
+    /// Whether this window shows the bind / test parameters grid.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use plsqlide::ui::window_kind::WindowKind;
+    ///
+    /// assert!(WindowKind::Sql.shows_parameters());
+    /// assert!(WindowKind::Test.shows_parameters());
+    /// assert!(!WindowKind::Command.shows_parameters());
+    /// ```
+    pub fn shows_parameters(self) -> bool {
+        matches!(self, Self::Test | Self::Sql)
+    }
+
     /// Initial template text for a new window.
     pub fn template(self) -> &'static str {
         match self {
