@@ -1,13 +1,17 @@
 //! Worksheet window kinds and code templates from the product plan.
 
+use crate::ui::i18n;
+
 /// Window type created via File → New.
 ///
 /// # Examples
 ///
 /// ```
+/// use plsqlide::ui::i18n;
 /// use plsqlide::ui::window_kind::WindowKind;
 ///
-/// assert_eq!(WindowKind::Sql.tab_title(), "SQL Window");
+/// i18n::init();
+/// assert_eq!(WindowKind::Sql.tab_title(), i18n::t("window.sql"));
 /// assert!(WindowKind::Procedure.template().contains("PROCEDURE"));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,25 +34,30 @@ pub enum WindowKind {
 }
 
 impl WindowKind {
-    /// Short title shown on the worksheet tab.
-    pub fn tab_title(self) -> &'static str {
+    /// i18n key for the worksheet tab title.
+    pub fn title_key(self) -> &'static str {
         match self {
-            Self::Blank => "Program Window",
-            Self::Function => "Function",
-            Self::JavaSource => "Java Source",
-            Self::Package => "Package",
-            Self::PackageBody => "Package Body",
-            Self::PackageSpecification => "Package Spec",
-            Self::Procedure => "Procedure",
-            Self::Trigger => "Trigger",
-            Self::Type => "Type",
-            Self::TypeBody => "Type Body",
-            Self::TypeSpecification => "Type Spec",
-            Self::Test => "Test Window",
-            Self::Sql => "SQL Window",
-            Self::Command => "Command Window",
-            Self::ExplainPlan => "Explain Plan",
+            Self::Blank => "window.blank",
+            Self::Function => "window.function",
+            Self::JavaSource => "window.java_source",
+            Self::Package => "window.package",
+            Self::PackageBody => "window.package_body",
+            Self::PackageSpecification => "window.package_specification",
+            Self::Procedure => "window.procedure",
+            Self::Trigger => "window.trigger",
+            Self::Type => "window.type",
+            Self::TypeBody => "window.type_body",
+            Self::TypeSpecification => "window.type_specification",
+            Self::Test => "window.test",
+            Self::Sql => "window.sql",
+            Self::Command => "window.command",
+            Self::ExplainPlan => "window.explain_plan",
         }
+    }
+
+    /// Short title shown on the worksheet tab.
+    pub fn tab_title(self) -> String {
+        i18n::t(self.title_key())
     }
 
     /// Syntect / iced highlighter token for this window kind.

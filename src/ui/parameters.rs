@@ -719,21 +719,25 @@ pub fn parameters_view(
     height: f32,
 ) -> Element<'_, ParamMessage> {
     let toolbar = row![
-        text("Parameters").size(12),
+        text(crate::ui::i18n::t("params.title")).size(12),
         Space::new().width(Fill),
-        param_icon_button(plus().size(14), "Add", ParamMessage::Add),
-        param_icon_button(trash().size(14), "Delete", ParamMessage::Delete),
+        param_icon_button(plus().size(14), crate::ui::i18n::t("params.add"), ParamMessage::Add),
+        param_icon_button(
+            trash().size(14),
+            crate::ui::i18n::t("params.delete"),
+            ParamMessage::Delete,
+        ),
     ]
     .spacing(6)
     .align_y(Vertical::Center)
     .padding(Padding::from([4, 8]));
 
     let header = row![
-        header_cell("", 28.0),
-        header_cell("Variable", 140.0),
-        header_cell("Mode", 90.0),
-        header_cell("Type", 180.0),
-        header_cell("Value", Fill),
+        header_cell(String::new(), 28.0),
+        header_cell(crate::ui::i18n::t("params.variable"), 140.0),
+        header_cell(crate::ui::i18n::t("params.mode"), 90.0),
+        header_cell(crate::ui::i18n::t("params.type"), 180.0),
+        header_cell(crate::ui::i18n::t("params.value"), Fill),
     ]
     .spacing(1)
     .padding(Padding::from([0, 4]));
@@ -838,8 +842,8 @@ fn parameter_row(
     .into()
 }
 
-fn header_cell<'a>(label: &'a str, width: impl Into<Length>) -> Element<'a, ParamMessage> {
-    container(text(label).size(11).color(ui_theme::current().muted))
+fn header_cell(label: impl Into<String>, width: impl Into<Length>) -> Element<'static, ParamMessage> {
+    container(text(label.into()).size(11).color(ui_theme::current().muted))
         .width(width)
         .padding(Padding::from([4, 4]))
         .into()
@@ -885,7 +889,7 @@ pub fn value_editor_modal(draft: &ValueEditorDraft) -> Element<'_, ParamMessage>
     };
 
     let form = column![
-        text("Edit value").size(16),
+        text(crate::ui::i18n::t("params.edit_value")).size(16),
         container(tabs).width(Fill).style(|_| header_bar_style()),
         container(editor)
             .width(Fill)
@@ -900,12 +904,12 @@ pub fn value_editor_modal(draft: &ValueEditorDraft) -> Element<'_, ParamMessage>
                 ..container::Style::default()
             }),
         row![
-            button(text("Cancel").size(13))
+            button(text(crate::ui::i18n::t("params.editor.cancel")).size(13))
                 .padding(Padding::from([8, 16]))
                 .style(|_, status| chrome_button_style(status))
                 .on_press(ParamMessage::EditorCancel),
             Space::new().width(Fill),
-            button(text("OK").size(13))
+            button(text(crate::ui::i18n::t("params.editor.ok")).size(13))
                 .padding(Padding::from([8, 16]))
                 .style(|_, status| primary_button_style(status))
                 .on_press(ParamMessage::EditorOk),
@@ -1015,7 +1019,7 @@ fn chrome_button_style(status: iced::widget::button::Status) -> iced::widget::bu
 /// Compact parameters toolbar button with a Lucide icon and a hover tooltip.
 fn param_icon_button<'a>(
     icon: iced::widget::Text<'a>,
-    tip: &'static str,
+    tip: impl Into<String>,
     message: ParamMessage,
 ) -> Element<'a, ParamMessage> {
     tooltip(
@@ -1023,7 +1027,7 @@ fn param_icon_button<'a>(
             .padding(Padding::from([3, 8]))
             .style(|_, status| chrome_button_style(status))
             .on_press(message),
-        text(tip).size(11),
+        text(tip.into()).size(11),
         tooltip::Position::Bottom,
     )
     .gap(4)

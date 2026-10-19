@@ -56,11 +56,14 @@ use crate::ui::parameters::{
     parameters_view, value_editor_modal, ParamMessage, ParametersPanel, ValueEditorDraft,
     PANEL_HEIGHT, PANEL_HEIGHT_MAX, PANEL_HEIGHT_MIN,
 };
+use crate::ui::preferences::{preferences_modal, PreferencesMessage, PreferencesState};
 use crate::ui::theme::{self as ui_theme, ThemeMode};
 use crate::ui::window_kind::WindowKind;
+use crate::ui::i18n;
 
 /// Runs the iced IDE window.
 pub fn run() -> iced::Result {
+    i18n::init();
     iced::application(App::new, update, view)
         .title("PLSQL IDE")
         .theme(|app: &App| {
@@ -138,7 +141,8 @@ struct ConnectionDraft {
 
 impl ConnectionDraft {
     fn from_new() -> Self {
-        let profile = ConnectionProfile::new("New connection", DbKind::Postgres);
+        let profile =
+            ConnectionProfile::new(i18n::t("dialog.connection.default_name"), DbKind::Postgres);
         Self::from_profile(&profile, true)
     }
 
@@ -159,12 +163,12 @@ impl ConnectionDraft {
         let port = self
             .port
             .parse::<u16>()
-            .map_err(|_| "Port must be a number".to_string())?;
+            .map_err(|_| i18n::t("dialog.connection.port_invalid"))?;
         if self.name.trim().is_empty() {
-            return Err("Name is required".into());
+            return Err(i18n::t("dialog.connection.name_required"));
         }
         if self.host.trim().is_empty() {
-            return Err("Host is required".into());
+            return Err(i18n::t("dialog.connection.host_required"));
         }
 
         let mut profile = ConnectionProfile {
@@ -204,18 +208,50 @@ enum RibbonTab {
 }
 
 impl RibbonTab {
-    fn label(self) -> &'static str {
-        match self {
-            Self::File => "File",
-            Self::Session => "Session",
-            Self::Settings => "Settings",
-            Self::Help => "Help",
-        }
+    fn label(self) -> String {
+        i18n::t(match self {
+            Self::File => "ribbon.tab.file",
+            Self::Session => "ribbon.tab.session",
+            Self::Settings => "ribbon.tab.settings",
+            Self::Help => "ribbon.tab.help",
+        })
     }
 
     fn all() -> [Self; 4] {
         [Self::File, Self::Session, Self::Settings, Self::Help]
     }
+}
+
+/// Ribbon File → New → Program Window menu label for a worksheet kind.
+fn window_kind_menu_label(kind: WindowKind) -> String {
+    i18n::t(match kind {
+        WindowKind::Blank => "menu.blank",
+        WindowKind::Function => "menu.function",
+        WindowKind::JavaSource => "menu.java_source",
+        WindowKind::Package => "menu.package",
+        WindowKind::PackageBody => "menu.package_body",
+        WindowKind::PackageSpecification => "menu.package_specification",
+        WindowKind::Procedure => "menu.procedure",
+        WindowKind::Trigger => "menu.trigger",
+        WindowKind::Type => "menu.type",
+        WindowKind::TypeBody => "menu.type_body",
+        WindowKind::TypeSpecification => "menu.type_specification",
+        WindowKind::Test => "menu.test_window",
+        WindowKind::Sql => "menu.sql_window",
+        WindowKind::Command => "menu.command_window",
+        WindowKind::ExplainPlan => "menu.explain_plan_window",
+    })
+}
+
+/// Translated folder title in the Objects tree (expand keys still use [`ObjectKind::label`]).
+fn object_kind_display(kind: ObjectKind) -> String {
+    i18n::t(match kind {
+        ObjectKind::Tables => "objects.kind.tables",
+        ObjectKind::Views => "objects.kind.views",
+        ObjectKind::Procedures => "objects.kind.procedures",
+        ObjectKind::Functions => "objects.kind.functions",
+        ObjectKind::Packages => "objects.kind.packages",
+    })
 }
 
 #[derive(Debug)]
@@ -233,6 +269,8 @@ struct App {
     connect_error: Option<String>,
     dialog: Option<ConnectionDraft>,
     dialog_error: Option<String>,
+    /// Open Preferences dialog (`None` when closed).
+    preferences: Option<PreferencesState>,
     /// Open Value ellipsis editor for a parameter row.
     value_editor: Option<ValueEditorDraft>,
     completion: Vec<String>,
@@ -292,7 +330,7 @@ enum Message {
     RibbonHover(Option<RibbonHoverTarget>),
     SetThemeMode(ThemeMode),
     MenuNew(WindowKind),
-    MenuOpenStub(&'static str),
+    MenuOpenStub(String),
     MenuSaveStub,
     MenuSaveAsStub,
     MenuExit,
@@ -316,6 +354,10 @@ enum Message {
     DialogPasswordChanged(String),
     DialogSave,
     DialogCancel,
+    /// Open the Preferences modal from Settings.
+    OpenPreferences,
+    /// Preferences tree / buttons.
+    Preferences(PreferencesMessage),
     /// Parameters grid / Value editor messages (SQL & Test windows).
     Param(ParamMessage),
     ApplyCompletion(String),
@@ -363,12 +405,13 @@ impl App {
             connect_error: None,
             dialog: None,
             dialog_error: None,
+            preferences: None,
             value_editor: None,
             completion: Vec::new(),
             completion_prefix: String::new(),
             selected_completion: 0,
             busy: false,
-            metrics: "Ready".into(),
+            metrics: i18n::t("status.ready"),
             last_output: String::new(),
             selected_node: None,
             expanded: Vec::new(),
@@ -419,7 +462,7 @@ impl App {
                 .find(|item| item.id == id)
                 .map(|profile| profile.summary())
                 .unwrap_or_else(|| "connection removed".into()),
-            None => "no connection".into(),
+            None => i18n::t("worksheet.no_connection"),
         }
     }
 
@@ -428,7 +471,7 @@ impl App {
         let connection_label = connection_id
             .and_then(|id| self.connections.iter().find(|item| item.id == id))
             .map(|profile| profile.name.clone())
-            .unwrap_or_else(|| "no connection".into());
+            .unwrap_or_else(|| i18n::t("worksheet.no_connection"));
 
         self.worksheets.push(Worksheet {
             kind,
@@ -440,7 +483,14 @@ impl App {
         self.active_tab = self.worksheets.len() - 1;
         self.completion.clear();
         self.value_editor = None;
-        self.metrics = format!("Opened {} · {connection_label}", kind.tab_title());
+        let kind_title = kind.tab_title();
+        self.metrics = i18n::t_args(
+            "status.opened",
+            &[
+                ("kind", kind_title.as_str()),
+                ("connection", connection_label.as_str()),
+            ],
+        );
     }
 
     fn active_parameters_mut(&mut self) -> Option<&mut ParametersPanel> {
@@ -458,15 +508,15 @@ impl App {
                     .unwrap_or(DbKind::Postgres);
                 if let Some(panel) = self.active_parameters_mut() {
                     panel.add(db_kind);
-                    self.metrics = "Parameter added".into();
+                    self.metrics = i18n::t("status.parameter_added");
                 }
             }
             ParamMessage::Delete => {
                 if let Some(panel) = self.active_parameters_mut() {
                     if panel.delete_selected() {
-                        self.metrics = "Parameter deleted".into();
+                        self.metrics = i18n::t("status.parameter_deleted");
                     } else {
-                        self.metrics = "Select a parameter to delete".into();
+                        self.metrics = i18n::t("status.parameter_select_delete");
                     }
                 }
             }
@@ -541,7 +591,7 @@ impl App {
                             row.value = value;
                         }
                     }
-                    self.metrics = "Parameter value updated".into();
+                    self.metrics = i18n::t("status.parameter_value_updated");
                 }
             }
             ParamMessage::EditorCancel => {
@@ -713,7 +763,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     }
                     current.push_str(&name);
                     *content = Content::with_text(&current);
-                    app.metrics = format!("Inserted `{name}`");
+                    app.metrics = i18n::t_args("status.inserted", &[("name", name.as_str())]);
                     app.completion.clear();
                 }
             }
@@ -734,16 +784,18 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.objects_connection = Some(list.connection_id);
                     app.object_owners = list.owners;
                     app.objects_error = None;
-                    app.metrics = format!(
-                        "Loaded {} object root(s) for {}",
-                        app.object_owners.len(),
-                        list.current_user
+                    app.metrics = i18n::t_args(
+                        "status.objects_loaded",
+                        &[
+                            ("count", &app.object_owners.len().to_string()),
+                            ("name", list.current_user.as_str()),
+                        ],
                     );
                 }
                 Err(error) => {
                     app.object_owners.clear();
                     app.objects_error = Some(error.clone());
-                    app.metrics = "Failed to load objects".into();
+                    app.metrics = i18n::t("status.objects_load_failed");
                 }
             }
             Task::none()
@@ -765,7 +817,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
                 Err(error) => {
                     app.objects_error = Some(error);
-                    app.metrics = "Failed to load object folder".into();
+                    app.metrics = i18n::t("status.objects_folder_failed");
                 }
             }
             Task::none()
@@ -790,7 +842,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::SetThemeMode(mode) => {
             app.theme_mode = mode;
             ui_theme::apply(mode);
-            app.metrics = format!("Theme: {}", mode.label());
+            let theme_name = mode.label();
+            app.metrics = i18n::t_args("theme.changed", &[("name", theme_name.as_str())]);
             Task::none()
         }
         Message::CloseTab(index) => {
@@ -812,15 +865,15 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::MenuOpenStub(label) => {
-            app.metrics = format!("{label}: open dialog not implemented yet");
+            app.metrics = i18n::t_args("status.open_stub", &[("label", label.as_str())]);
             Task::none()
         }
         Message::MenuSaveStub => {
-            app.metrics = "Save: not implemented yet".into();
+            app.metrics = i18n::t("status.save_stub");
             Task::none()
         }
         Message::MenuSaveAsStub => {
-            app.metrics = "Save As: not implemented yet".into();
+            app.metrics = i18n::t("status.save_as_stub");
             Task::none()
         }
         Message::MenuExit => iced::exit(),
@@ -828,7 +881,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::SelectConnection(id) => {
             app.selected_connection = Some(id);
             if let Some(profile) = app.selected_profile() {
-                app.metrics = format!("Selected {}", profile.name);
+                app.metrics =
+                    i18n::t_args("status.selected_connection", &[("name", profile.name.as_str())]);
             }
             if app.selected_is_connected() {
                 start_load_object_roots(app)
@@ -847,13 +901,13 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.dialog = Some(ConnectionDraft::from_profile(&profile, false));
                 app.dialog_error = None;
             } else {
-                app.metrics = "Select a connection to edit".into();
+                app.metrics = i18n::t("status.select_to_edit");
             }
             Task::none()
         }
         Message::DeleteConnection => {
             let Some(id) = app.selected_connection else {
-                app.metrics = "Select a connection to delete".into();
+                app.metrics = i18n::t("status.select_to_delete");
                 return Task::none();
             };
             app.connections.retain(|item| item.id != id);
@@ -867,7 +921,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.clear_object_browser();
             }
             app.selected_connection = app.connections.first().map(|item| item.id);
-            app.metrics = "Connection deleted".into();
+            app.metrics = i18n::t("status.connection_deleted");
             if app.selected_is_connected() {
                 start_load_object_roots(app)
             } else {
@@ -888,7 +942,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                         .find(|item| item.id == id)
                         .map(|item| item.name.clone())
                         .unwrap_or_else(|| "connection".into());
-                    app.metrics = format!("Connected to {name}");
+                    app.metrics = i18n::t_args("status.connected", &[("name", name.as_str())]);
                     if app.selected_connection == Some(id) {
                         start_load_object_roots(app)
                     } else {
@@ -898,7 +952,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 Err(error) => {
                     app.connection_status.insert(id, ConnectionStatus::Failed);
                     app.connect_error = Some(error);
-                    app.metrics = "Connect failed".into();
+                    app.metrics = i18n::t("status.connect_failed");
                     if app.objects_connection == Some(id) {
                         app.clear_object_browser();
                     }
@@ -961,6 +1015,21 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.dialog_error = None;
             Task::none()
         }
+        Message::OpenPreferences => {
+            app.preferences = Some(PreferencesState::new());
+            Task::none()
+        }
+        Message::Preferences(message) => {
+            let should_close = app
+                .preferences
+                .as_mut()
+                .map(|state| state.update(message))
+                .unwrap_or(true);
+            if should_close {
+                app.preferences = None;
+            }
+            Task::none()
+        }
         Message::Param(message) => {
             app.handle_param_message(message);
             Task::none()
@@ -975,10 +1044,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     if let Some(index) = app.connections.iter().position(|item| item.id == id) {
                         app.connections[index] = profile;
                         app.connection_status.remove(&id);
-                        app.metrics = "Connection updated".into();
+                        app.metrics = i18n::t("status.connection_updated");
                     } else {
                         app.connections.push(profile);
-                        app.metrics = "Connection added".into();
+                        app.metrics = i18n::t("status.connection_added");
                     }
                     app.selected_connection = Some(id);
                     app.dialog = None;
@@ -1016,11 +1085,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             match result {
                 Ok(output) => {
                     app.last_output = output;
-                    app.metrics = "Execute completed".into();
+                    app.metrics = i18n::t("status.execute_completed");
                 }
                 Err(error) => {
                     app.last_output = error;
-                    app.metrics = "Execute failed".into();
+                    app.metrics = i18n::t("status.execute_failed");
                 }
             }
             Task::none()
@@ -1066,14 +1135,14 @@ fn run_connect(app: &mut App) -> Task<Message> {
         return Task::none();
     }
     let Some(profile) = app.selected_profile().cloned() else {
-        app.metrics = "Select a connection to connect".into();
+        app.metrics = i18n::t("status.select_to_connect");
         return Task::none();
     };
 
     let id = profile.id;
     app.busy = true;
     app.connect_error = None;
-    app.metrics = format!("Connecting to {}…", profile.name);
+    app.metrics = i18n::t_args("status.connecting", &[("name", profile.name.as_str())]);
 
     match profile.db_kind {
         DbKind::Postgres => {
@@ -1119,9 +1188,8 @@ fn run_connect(app: &mut App) -> Task<Message> {
             {
                 app.busy = false;
                 app.connection_status.insert(id, ConnectionStatus::Failed);
-                app.connect_error =
-                    Some("Oracle feature is disabled. Rebuild with --features oracle".into());
-                app.metrics = "Connect failed".into();
+                app.connect_error = Some(i18n::t("status.oracle_disabled"));
+                app.metrics = i18n::t("status.connect_failed");
                 Task::none()
             }
         }
@@ -1148,7 +1216,7 @@ fn start_load_object_roots(app: &mut App) -> Task<Message> {
     app.expanded.clear();
     app.selected_node = None;
     app.objects_connection = Some(profile.id);
-    app.metrics = format!("Loading objects for {}…", profile.name);
+    app.metrics = i18n::t_args("status.loading_objects", &[("name", profile.name.as_str())]);
 
     Task::perform(
         async move {
@@ -1202,13 +1270,13 @@ fn run_spike(app: &mut App) -> Task<Message> {
         return Task::none();
     }
     let Some(profile) = app.active_worksheet_profile().cloned() else {
-        app.metrics = "Active worksheet has no connection".into();
+        app.metrics = i18n::t("status.no_worksheet_connection");
         return Task::none();
     };
 
     app.busy = true;
-    app.metrics = format!("Executing on {}…", profile.name);
-    app.last_output = "Running…".into();
+    app.metrics = i18n::t_args("status.executing", &[("name", profile.name.as_str())]);
+    app.last_output = i18n::t("status.running");
 
     let sql = app.active_content().map(|content| content.text());
 
@@ -1255,9 +1323,8 @@ fn run_spike(app: &mut App) -> Task<Message> {
             #[cfg(not(feature = "oracle"))]
             {
                 app.busy = false;
-                app.last_output =
-                    "Oracle feature is disabled. Rebuild with --features oracle".into();
-                app.metrics = "Execute failed".into();
+                app.last_output = i18n::t("status.oracle_disabled");
+                app.metrics = i18n::t("status.execute_failed");
                 Task::none()
             }
         }
@@ -1303,6 +1370,11 @@ fn view(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .height(Fill)
             .into()
+    } else if let Some(state) = &app.preferences {
+        stack![base, preferences_modal(state).map(Message::Preferences)]
+            .width(Fill)
+            .height(Fill)
+            .into()
     } else if let Some(draft) = &app.value_editor {
         stack![base, value_editor_modal(draft).map(Message::Param)]
             .width(Fill)
@@ -1323,7 +1395,8 @@ fn view(app: &App) -> Element<'_, Message> {
     }
 }
 
-fn ribbon_menu_item(label: &'static str) -> iced::widget::Button<'static, Message> {
+fn ribbon_menu_item(label: impl Into<String>) -> iced::widget::Button<'static, Message> {
+    let label = label.into();
     button(
         container(text(label).size(13))
             .width(Fill)
@@ -1334,7 +1407,8 @@ fn ribbon_menu_item(label: &'static str) -> iced::widget::Button<'static, Messag
     .style(move |_, status| menu_item_button_style(status))
 }
 
-fn ribbon_command(label: &'static str) -> iced::widget::Button<'static, Message> {
+fn ribbon_command(label: impl Into<String>) -> iced::widget::Button<'static, Message> {
+    let label = label.into();
     button(text(label).size(12))
         .padding(Padding::from([4, 10]))
         .style(move |_, status| ribbon_command_style(status, false))
@@ -1343,11 +1417,12 @@ fn ribbon_command(label: &'static str) -> iced::widget::Button<'static, Message>
 /// File ribbon New/Open: own hover tracking, because iced_aw MenuBar does not
 /// put the root button into `Hovered` while the menu is closed.
 fn ribbon_dropdown(
-    label: &'static str,
+    label: impl Into<String>,
     target: RibbonHoverTarget,
     hovered: bool,
     menu: Menu<'static, Message, Theme, iced::Renderer>,
 ) -> Element<'static, Message> {
+    let label = label.into();
     let trigger = button(text(label).size(12))
         .padding(Padding::from([4, 10]))
         .style(move |_, status| ribbon_command_style(status, hovered));
@@ -1379,9 +1454,10 @@ fn ribbon_divider() -> Element<'static, Message> {
 }
 
 fn ribbon_group<'a>(
-    label: &'static str,
+    label: impl Into<String>,
     content: Element<'a, Message>,
 ) -> Element<'a, Message> {
+    let label = label.into();
     container(
         column![
             container(content)
@@ -1447,25 +1523,48 @@ fn ribbon(app: &App) -> Element<'_, Message> {
         });
 
     let program_menu = Menu::new(vec![
-        Item::new(ribbon_menu_item("Blank").on_press(Message::MenuNew(WindowKind::Blank))),
-        Item::new(ribbon_menu_item("Function").on_press(Message::MenuNew(WindowKind::Function))),
         Item::new(
-            ribbon_menu_item("Java Source").on_press(Message::MenuNew(WindowKind::JavaSource)),
-        ),
-        Item::new(ribbon_menu_item("Package").on_press(Message::MenuNew(WindowKind::Package))),
-        Item::new(
-            ribbon_menu_item("Package Body").on_press(Message::MenuNew(WindowKind::PackageBody)),
+            ribbon_menu_item(window_kind_menu_label(WindowKind::Blank))
+                .on_press(Message::MenuNew(WindowKind::Blank)),
         ),
         Item::new(
-            ribbon_menu_item("Package Specification")
+            ribbon_menu_item(window_kind_menu_label(WindowKind::Function))
+                .on_press(Message::MenuNew(WindowKind::Function)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::JavaSource))
+                .on_press(Message::MenuNew(WindowKind::JavaSource)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::Package))
+                .on_press(Message::MenuNew(WindowKind::Package)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::PackageBody))
+                .on_press(Message::MenuNew(WindowKind::PackageBody)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::PackageSpecification))
                 .on_press(Message::MenuNew(WindowKind::PackageSpecification)),
         ),
-        Item::new(ribbon_menu_item("Procedure").on_press(Message::MenuNew(WindowKind::Procedure))),
-        Item::new(ribbon_menu_item("Trigger").on_press(Message::MenuNew(WindowKind::Trigger))),
-        Item::new(ribbon_menu_item("Type").on_press(Message::MenuNew(WindowKind::Type))),
-        Item::new(ribbon_menu_item("Type Body").on_press(Message::MenuNew(WindowKind::TypeBody))),
         Item::new(
-            ribbon_menu_item("Type Specification")
+            ribbon_menu_item(window_kind_menu_label(WindowKind::Procedure))
+                .on_press(Message::MenuNew(WindowKind::Procedure)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::Trigger))
+                .on_press(Message::MenuNew(WindowKind::Trigger)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::Type))
+                .on_press(Message::MenuNew(WindowKind::Type)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::TypeBody))
+                .on_press(Message::MenuNew(WindowKind::TypeBody)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::TypeSpecification))
                 .on_press(Message::MenuNew(WindowKind::TypeSpecification)),
         ),
     ])
@@ -1475,12 +1574,24 @@ fn ribbon(app: &App) -> Element<'_, Message> {
     .close_on_background_click(true);
 
     let new_menu = Menu::new(vec![
-        Item::with_menu(ribbon_menu_item("Program Window"), program_menu),
-        Item::new(ribbon_menu_item("Test Window").on_press(Message::MenuNew(WindowKind::Test))),
-        Item::new(ribbon_menu_item("SQL Window").on_press(Message::MenuNew(WindowKind::Sql))),
-        Item::new(ribbon_menu_item("Command Window").on_press(Message::MenuNew(WindowKind::Command))),
+        Item::with_menu(
+            ribbon_menu_item(i18n::t("menu.program_window")),
+            program_menu,
+        ),
         Item::new(
-            ribbon_menu_item("Explain Plan Window")
+            ribbon_menu_item(window_kind_menu_label(WindowKind::Test))
+                .on_press(Message::MenuNew(WindowKind::Test)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::Sql))
+                .on_press(Message::MenuNew(WindowKind::Sql)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::Command))
+                .on_press(Message::MenuNew(WindowKind::Command)),
+        ),
+        Item::new(
+            ribbon_menu_item(window_kind_menu_label(WindowKind::ExplainPlan))
                 .on_press(Message::MenuNew(WindowKind::ExplainPlan)),
         ),
     ])
@@ -1490,10 +1601,23 @@ fn ribbon(app: &App) -> Element<'_, Message> {
     .close_on_background_click(true);
 
     let open_menu = Menu::new(vec![
-        Item::new(ribbon_menu_item("Program File").on_press(Message::MenuOpenStub("Program File"))),
-        Item::new(ribbon_menu_item("Test Script").on_press(Message::MenuOpenStub("Test Script"))),
-        Item::new(ribbon_menu_item("SQL Script").on_press(Message::MenuOpenStub("SQL Script"))),
-        Item::new(ribbon_menu_item("Command File").on_press(Message::MenuOpenStub("Command File"))),
+        Item::new(
+            ribbon_menu_item(i18n::t("menu.program_file")).on_press(Message::MenuOpenStub(i18n::t(
+                "menu.program_file",
+            ))),
+        ),
+        Item::new(
+            ribbon_menu_item(i18n::t("menu.test_script"))
+                .on_press(Message::MenuOpenStub(i18n::t("menu.test_script"))),
+        ),
+        Item::new(
+            ribbon_menu_item(i18n::t("menu.sql_script"))
+                .on_press(Message::MenuOpenStub(i18n::t("menu.sql_script"))),
+        ),
+        Item::new(
+            ribbon_menu_item(i18n::t("menu.command_file"))
+                .on_press(Message::MenuOpenStub(i18n::t("menu.command_file"))),
+        ),
     ])
     .max_width(200.0)
     .offset(1.0)
@@ -1508,28 +1632,38 @@ fn ribbon(app: &App) -> Element<'_, Message> {
 
             row![
                 ribbon_group(
-                    "Open",
+                    i18n::t("ribbon.group.open"),
                     row![
-                        ribbon_dropdown("New", RibbonHoverTarget::New, new_hovered, new_menu),
-                        ribbon_dropdown("Open", RibbonHoverTarget::Open, open_hovered, open_menu),
+                        ribbon_dropdown(
+                            i18n::t("ribbon.new"),
+                            RibbonHoverTarget::New,
+                            new_hovered,
+                            new_menu,
+                        ),
+                        ribbon_dropdown(
+                            i18n::t("ribbon.open"),
+                            RibbonHoverTarget::Open,
+                            open_hovered,
+                            open_menu,
+                        ),
                     ]
                     .spacing(4)
                     .into(),
                 ),
                 ribbon_divider(),
                 ribbon_group(
-                    "Save",
+                    i18n::t("ribbon.group.save"),
                     row![
-                        ribbon_command("Save").on_press(Message::MenuSaveStub),
-                        ribbon_command("Save As").on_press(Message::MenuSaveAsStub),
+                        ribbon_command(i18n::t("ribbon.save")).on_press(Message::MenuSaveStub),
+                        ribbon_command(i18n::t("ribbon.save_as")).on_press(Message::MenuSaveAsStub),
                     ]
                     .spacing(4)
                     .into(),
                 ),
                 ribbon_divider(),
                 ribbon_group(
-                    "Application",
-                    ribbon_command("Exit").on_press(Message::MenuExit).into(),
+                    i18n::t("ribbon.group.application"),
+                    ribbon_command(i18n::t("ribbon.exit")).on_press(Message::MenuExit).into(),
                 ),
                 Space::new().width(Fill),
             ]
@@ -1539,8 +1673,10 @@ fn ribbon(app: &App) -> Element<'_, Message> {
         }
         RibbonTab::Session => row![
             ribbon_group(
-                "Execute",
-                ribbon_command("Execute").on_press(Message::MenuExecute).into(),
+                i18n::t("ribbon.group.execute"),
+                ribbon_command(i18n::t("ribbon.execute"))
+                    .on_press(Message::MenuExecute)
+                    .into(),
             ),
             Space::new().width(Fill),
         ]
@@ -1558,14 +1694,21 @@ fn ribbon(app: &App) -> Element<'_, Message> {
                 );
             }
             row![
-                ribbon_group("Theme", theme_row.into()),
+                ribbon_group(
+                    i18n::t("ribbon.group.application"),
+                    ribbon_command(i18n::t("ribbon.preferences"))
+                        .on_press(Message::OpenPreferences)
+                        .into(),
+                ),
+                ribbon_divider(),
+                ribbon_group(i18n::t("ribbon.group.theme"), theme_row.into()),
                 Space::new().width(Fill),
             ]
             .align_y(Vertical::Center)
             .into()
         }
         RibbonTab::Help => container(
-            text("About and documentation will appear here")
+            text(i18n::t("help.placeholder"))
                 .size(12)
                 .color(ui_theme::current().muted),
         )
@@ -1616,13 +1759,13 @@ fn side_browser(app: &App) -> Element<'_, Message> {
     }
 
     let connections = column![
-        section_title("Connections"),
+        section_title(i18n::t("connections.title")),
         container(
             row![
-                dock_icon_button(plus().size(14), "Add", Message::AddConnection),
-                dock_icon_button(pencil().size(14), "Edit", Message::EditConnection),
-                dock_icon_button(trash().size(14), "Delete", Message::DeleteConnection),
-                dock_icon_button(plug().size(14), "Connect", Message::ConnectSelected),
+                dock_icon_button(plus().size(14), i18n::t("connections.add"), Message::AddConnection),
+                dock_icon_button(pencil().size(14), i18n::t("connections.edit"), Message::EditConnection),
+                dock_icon_button(trash().size(14), i18n::t("connections.delete"), Message::DeleteConnection),
+                dock_icon_button(plug().size(14), i18n::t("connections.connect"), Message::ConnectSelected),
             ]
             .spacing(4)
         )
@@ -1640,7 +1783,7 @@ fn side_browser(app: &App) -> Element<'_, Message> {
 
     let objects_body: Element<'_, Message> = if !app.selected_is_connected() {
         container(
-            text("Connect to load objects")
+            text(i18n::t("objects.connect_to_load"))
                 .size(12)
                 .color(ui_theme::current().muted),
         )
@@ -1649,7 +1792,7 @@ fn side_browser(app: &App) -> Element<'_, Message> {
         .into()
     } else if app.objects_loading {
         container(
-            text("Loading objects…")
+            text(i18n::t("objects.loading"))
                 .size(12)
                 .color(ui_theme::current().muted),
         )
@@ -1679,7 +1822,7 @@ fn side_browser(app: &App) -> Element<'_, Message> {
 
         if app.object_owners.is_empty() && app.objects_error.is_none() {
             tree = tree.push(
-                text("No schemas / users found")
+                text(i18n::t("objects.empty"))
                     .size(12)
                     .color(ui_theme::current().muted),
             );
@@ -1712,10 +1855,10 @@ fn side_browser(app: &App) -> Element<'_, Message> {
     };
 
     let objects = column![
-        section_title("Objects"),
+        section_title(i18n::t("objects.title")),
         container(
             checkbox(app.current_user_only)
-                .label("Only current user")
+                .label(i18n::t("objects.only_current_user"))
                 .size(14)
                 .text_size(12)
                 .on_toggle(Message::ToggleCurrentUserOnly),
@@ -1727,10 +1870,16 @@ fn side_browser(app: &App) -> Element<'_, Message> {
             left: 8.0,
         }),
         container(
-            text_input("Enter filter text…", &app.filter)
-                .on_input(Message::FilterChanged)
-                .padding(6)
-                .size(13),
+            column![
+                text(i18n::t("objects.filter_placeholder"))
+                    .size(11)
+                    .color(ui_theme::current().muted),
+                text_input("", &app.filter)
+                    .on_input(Message::FilterChanged)
+                    .padding(6)
+                    .size(13),
+            ]
+            .spacing(2),
         )
         .padding(Padding {
             top: 6.0,
@@ -1764,49 +1913,55 @@ fn side_browser(app: &App) -> Element<'_, Message> {
 fn connection_modal(app: &App) -> Element<'_, Message> {
     let draft = app.dialog.as_ref().expect("modal open");
     let title = if draft.id.is_some() {
-        "Edit connection"
+        i18n::t("dialog.connection.edit")
     } else {
-        "Add connection"
+        i18n::t("dialog.connection.add")
     };
-
     let db_kinds = [DbKind::Oracle, DbKind::Postgres];
+    let database_field_label = if draft.db_kind == DbKind::Oracle {
+        i18n::t("dialog.connection.service")
+    } else {
+        i18n::t("dialog.connection.database")
+    };
 
     let form = column![
         text(title).size(18),
-        labeled_input("Name", &draft.name, Message::DialogNameChanged),
-        text("Database type").size(12).color(ui_theme::current().muted),
+        labeled_input(i18n::t("dialog.connection.name"), &draft.name, Message::DialogNameChanged),
+        text(i18n::t("dialog.connection.db_type"))
+            .size(12)
+            .color(ui_theme::current().muted),
         pick_list(db_kinds, Some(draft.db_kind), Message::DialogDbKindChanged)
             .padding(8)
             .width(Fill),
-        labeled_input("Host / address", &draft.host, Message::DialogHostChanged),
-        labeled_input("Port", &draft.port, Message::DialogPortChanged),
+        labeled_input(i18n::t("dialog.connection.host"), &draft.host, Message::DialogHostChanged),
+        labeled_input(i18n::t("dialog.connection.port"), &draft.port, Message::DialogPortChanged),
         labeled_input(
-            if draft.db_kind == DbKind::Oracle {
-                "Service name / SID"
-            } else {
-                "Database"
-            },
+            database_field_label,
             &draft.database,
             Message::DialogDatabaseChanged,
         ),
-        labeled_input("Username", &draft.username, Message::DialogUsernameChanged),
-        {
-            text_input("Password", &draft.password)
-                .on_input(Message::DialogPasswordChanged)
-                .secure(true)
-                .padding(8)
-        },
+        labeled_input(
+            i18n::t("dialog.connection.username"),
+            &draft.username,
+            Message::DialogUsernameChanged,
+        ),
+        labeled_input_secure(
+            i18n::t("dialog.connection.password"),
+            &draft.password,
+            Message::DialogPasswordChanged,
+            true,
+        ),
         if let Some(error) = &app.dialog_error {
             text(error.clone()).size(12).color(Color::from_rgb(1.0, 0.45, 0.45))
         } else {
             text("").size(12)
         },
         row![
-            button(text("Cancel").size(13))
+            button(text(i18n::t("dialog.connection.cancel")).size(13))
                 .padding(Padding::from([8, 16]))
                 .on_press(Message::DialogCancel),
             Space::new().width(Fill),
-            button(text("Save").size(13))
+            button(text(i18n::t("dialog.connection.save")).size(13))
                 .padding(Padding::from([8, 16]))
                 .style(|_, status| primary_button_style(status))
                 .on_press(Message::DialogSave),
@@ -1857,17 +2012,19 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
 fn connect_error_modal(app: &App) -> Element<'_, Message> {
     let error = app
         .connect_error
-        .as_deref()
-        .unwrap_or("Unknown connection error");
+        .clone()
+        .unwrap_or_else(|| i18n::t("dialog.connect_failed.unknown"));
 
     let form = column![
-        text("Connection failed").size(18).color(Color::from_rgb(0.90, 0.28, 0.28)),
-        text(error.to_string())
+        text(i18n::t("dialog.connect_failed.title"))
+            .size(18)
+            .color(Color::from_rgb(0.90, 0.28, 0.28)),
+        text(error)
             .size(13)
             .color(ui_theme::current().text),
         row![
             Space::new().width(Fill),
-            button(text("OK").size(13))
+            button(text(i18n::t("dialog.connect_failed.ok")).size(13))
                 .padding(Padding::from([8, 16]))
                 .style(|_, status| primary_button_style(status))
                 .on_press(Message::DismissConnectError),
@@ -1913,20 +2070,35 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
     )
 }
 
-fn labeled_input<'a>(
-    label: &'a str,
+fn labeled_input(
+    label: impl Into<String>,
     value: &str,
-    on_input: impl Fn(String) -> Message + 'a,
-) -> Element<'a, Message> {
+    on_input: impl Fn(String) -> Message + 'static,
+) -> Element<'static, Message> {
+    labeled_input_secure(label, value, on_input, false)
+}
+
+fn labeled_input_secure(
+    label: impl Into<String>,
+    value: &str,
+    on_input: impl Fn(String) -> Message + 'static,
+    secure: bool,
+) -> Element<'static, Message> {
+    let label = label.into();
+    let mut input = text_input("", value).on_input(on_input).padding(8);
+    if secure {
+        input = input.secure(true);
+    }
     column![
         text(label).size(12).color(ui_theme::current().muted),
-        text_input(label, value).on_input(on_input).padding(8),
+        input,
     ]
     .spacing(4)
     .into()
 }
 
-fn section_title(title: &'static str) -> Element<'static, Message> {
+fn section_title(title: impl Into<String>) -> Element<'static, Message> {
+    let title = title.into();
     container(text(title).size(13))
         .width(Fill)
         .padding(Padding {
@@ -1960,7 +2132,7 @@ fn object_folder<'a>(
 
     let mut children = column![browser_row(
         app,
-        format!("  {marker}  {}", kind.label()),
+        format!("  {marker}  {}", object_kind_display(kind)),
         folder_node,
         Some(key.clone()),
     )];
@@ -1969,7 +2141,7 @@ fn object_folder<'a>(
         if loading && names.is_none() {
             children = children.push(
                 container(
-                    text("    …")
+                    text(format!("    {}", i18n::t("objects.loading_folder")))
                         .size(12)
                         .color(ui_theme::current().muted)
                         .font(Font::MONOSPACE),
@@ -2079,11 +2251,13 @@ fn worksheet_connection_bar(app: &App) -> Element<'_, Message> {
         .worksheets
         .get(app.active_tab)
         .map(|sheet| app.worksheet_connection_label(sheet))
-        .unwrap_or_else(|| "no connection".into());
+        .unwrap_or_else(|| i18n::t("worksheet.no_connection"));
 
     container(
         row![
-            text("Database:").size(11).color(ui_theme::current().muted),
+            text(i18n::t("worksheet.database"))
+                .size(11)
+                .color(ui_theme::current().muted),
             text(label).size(11),
         ]
         .spacing(6)
@@ -2328,7 +2502,7 @@ fn status_bar(app: &App) -> Element<'_, Message> {
                 .get(app.active_tab)
                 .map(|sheet| app.worksheet_connection_label(sheet))
         })
-        .unwrap_or_else(|| "no connection".into());
+        .unwrap_or_else(|| i18n::t("worksheet.no_connection"));
     let detail = if app.last_output.is_empty() {
         app.metrics.clone()
     } else {
@@ -2337,7 +2511,11 @@ fn status_bar(app: &App) -> Element<'_, Message> {
 
     container(
         row![
-            text(format!("Worksheet DB: {connection}")).size(12),
+            text(i18n::t_args(
+                "worksheet.db_label",
+                &[("connection", connection.as_str())],
+            ))
+            .size(12),
             Space::new().width(Fill),
             text(detail).size(12).color(ui_theme::current().muted),
         ]
@@ -2511,9 +2689,10 @@ fn dock_tool_style(status: iced::widget::button::Status) -> iced::widget::button
 /// Compact toolbar button with a Lucide icon and a hover tooltip.
 fn dock_icon_button<'a>(
     icon: iced::widget::Text<'a>,
-    tip: &'static str,
+    tip: impl Into<String>,
     message: Message,
 ) -> Element<'a, Message> {
+    let tip = tip.into();
     tooltip(
         button(icon)
             .padding(Padding::from([4, 8]))

@@ -24,13 +24,18 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    /// Label shown in Settings.
-    pub fn label(self) -> &'static str {
+    /// i18n key for the Settings label.
+    pub fn key(self) -> &'static str {
         match self {
-            Self::System => "System",
-            Self::Light => "Light",
-            Self::Dark => "Dark",
+            Self::System => "theme.system",
+            Self::Light => "theme.light",
+            Self::Dark => "theme.dark",
         }
+    }
+
+    /// Translated label shown in Settings.
+    pub fn label(self) -> String {
+        crate::ui::i18n::t(self.key())
     }
 
     /// All selectable modes in Settings order.
