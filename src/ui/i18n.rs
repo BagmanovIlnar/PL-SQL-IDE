@@ -116,8 +116,14 @@ impl I18n {
         let locales_dir = config_dir.join("locales");
         let settings_path = config_dir.join("settings.json");
         let _ = fs::create_dir_all(&locales_dir);
-        sync_shipped_locale(&locales_dir, "en.json", EMBEDDED_EN);
-        sync_shipped_locale(&locales_dir, "ru.json", EMBEDDED_RU);
+        let english = parse_locale_file(EMBEDDED_EN);
+        sync_shipped_locale(&locales_dir, "en.json", EMBEDDED_EN, None);
+        sync_shipped_locale(
+            &locales_dir,
+            "ru.json",
+            EMBEDDED_RU,
+            english.as_ref(),
+        );
 
         let fallback = parse_locale_file(EMBEDDED_EN)
             .map(|file| file.strings)
@@ -182,9 +188,15 @@ impl I18n {
     }
 }
 
-/// Write shipped locale if missing; otherwise add any new keys from the
-/// embedded catalog without overwriting existing translations.
-fn sync_shipped_locale(dir: &Path, file_name: &str, contents: &str) {
+/// Write shipped locale if missing; otherwise merge keys from the embedded
+/// catalog. Existing custom translations are kept. Values that still match the
+/// English catalog (untranslated placeholders) are refreshed from `embedded`.
+fn sync_shipped_locale(
+    dir: &Path,
+    file_name: &str,
+    contents: &str,
+    english: Option<&LocaleFile>,
+) {
     let path = dir.join(file_name);
     let Some(embedded) = parse_locale_file(contents) else {
         return;
@@ -210,9 +222,22 @@ fn sync_shipped_locale(dir: &Path, file_name: &str, contents: &str) {
         changed = true;
     }
     for (key, value) in &embedded.strings {
-        if !on_disk.strings.contains_key(key) {
-            on_disk.strings.insert(key.clone(), value.clone());
-            changed = true;
+        match on_disk.strings.get(key) {
+            None => {
+                on_disk.strings.insert(key.clone(), value.clone());
+                changed = true;
+            }
+            Some(existing)
+                if existing != value
+                    && english
+                        .and_then(|en| en.strings.get(key))
+                        .is_some_and(|en_val| en_val == existing) =>
+            {
+                // Still the English string — apply the shipped translation.
+                on_disk.strings.insert(key.clone(), value.clone());
+                changed = true;
+            }
+            _ => {}
         }
     }
     if changed {
@@ -286,7 +311,8 @@ fn load_settings(path: &Path) -> AppSettings {
         .unwrap_or_default()
 }
 
-fn config_dir() -> PathBuf {
+/// Application config directory (`settings.json`, `locales/`, Oracle prefs, …).
+pub fn config_dir() -> PathBuf {
     ProjectDirs::from("com", "plsqlide", "PL-SQL-IDE")
         .map(|dirs| dirs.config_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(".").join("config"))

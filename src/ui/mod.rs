@@ -3,6 +3,8 @@
 pub mod app;
 pub mod completion;
 pub mod i18n;
+pub mod oracle_prefs;
+pub mod oracle_wizard;
 pub mod parameters;
 pub mod preferences;
 pub mod theme;

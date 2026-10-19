@@ -361,6 +361,8 @@ fn list_owners_oracle_blocking(
 ) -> CoreResult<ObjectOwnerList> {
     use oracle::Connector;
 
+    super::oracle_connection_prefs::prepare_oracle_client()?;
+
     let username = oracle_owner_name(&profile.username);
     if current_user_only {
         return Ok(ObjectOwnerList {
@@ -409,6 +411,8 @@ fn list_objects_oracle_blocking(
     kind: ObjectKind,
 ) -> CoreResult<ObjectNameList> {
     use oracle::Connector;
+
+    super::oracle_connection_prefs::prepare_oracle_client()?;
 
     let mut connector = Connector::new(
         &profile.username,

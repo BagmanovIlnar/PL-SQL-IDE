@@ -27,6 +27,8 @@ chrono = { version = "0.4", features = ["serde"] }
 oracle = { version = "0.6", optional = true }
 directories = "6"
 keyring = "3"
+rfd = "0.15"
+open = "5"
 
 [profile.release]
 codegen-units = 1

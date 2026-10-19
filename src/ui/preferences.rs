@@ -12,6 +12,10 @@ use iced::widget::{
 use iced::{Background, Color, Element, Fill, Padding};
 
 use crate::ui::i18n::{self, LocaleInfo};
+use crate::ui::oracle_prefs::{
+    oracle_connection_page, OracleConnectionForm, OracleConnectionMessage,
+};
+use crate::ui::oracle_wizard::oracle_wizard_modal;
 use crate::ui::theme as ui_theme;
 
 /// Top-level Preferences category shown in the left tree.
@@ -156,6 +160,8 @@ pub struct PreferencesState {
     pub language: LocaleInfo,
     /// Locales discovered on disk when the dialog opened.
     pub available: Vec<LocaleInfo>,
+    /// Draft Oracle → Connection form (saved on OK).
+    pub oracle_connection: OracleConnectionForm,
     /// Sections whose children are visible in the tree.
     expanded: Vec<PreferencesSection>,
 }
@@ -178,6 +184,7 @@ impl PreferencesState {
             selected: PreferencesPage::UiAppearance,
             language,
             available,
+            oracle_connection: OracleConnectionForm::load(),
             expanded: vec![
                 PreferencesSection::UserInterface,
                 PreferencesSection::Oracle,
@@ -223,17 +230,21 @@ pub enum PreferencesMessage {
     ToggleSection(PreferencesSection),
     /// Appearance → Language combo changed.
     LanguageChanged(LocaleInfo),
-    /// Close without applying (Cancel / backdrop).
+    /// Oracle → Connection page controls.
+    OracleConnection(OracleConnectionMessage),
+    /// Close without applying (Cancel only — not backdrop).
     Close,
-    /// Apply draft language and close.
+    /// Outside click on the dimmed layer; ignored so the dialog stays open.
+    Backdrop,
+    /// Apply draft language + Oracle connection and close.
     Ok,
 }
 
 impl PreferencesState {
     /// Apply a Preferences UI message.
     ///
-    /// Returns `true` when the dialog should close. On `Ok`, activates and
-    /// persists the draft locale via [`i18n::set_locale`].
+    /// Returns `true` when the dialog should close. On `Ok`, activates the
+    /// draft locale and persists Oracle connection prefs.
     pub fn update(&mut self, message: PreferencesMessage) -> bool {
         match message {
             PreferencesMessage::SelectPage(page) => {
@@ -248,9 +259,15 @@ impl PreferencesState {
                 self.language = language;
                 false
             }
+            PreferencesMessage::OracleConnection(message) => {
+                self.oracle_connection.update(message);
+                false
+            }
+            PreferencesMessage::Backdrop => false,
             PreferencesMessage::Close => true,
             PreferencesMessage::Ok => {
                 let _ = i18n::set_locale(&self.language.code);
+                self.oracle_connection.save();
                 true
             }
         }
@@ -261,6 +278,9 @@ impl PreferencesState {
 fn preferences_page(state: &PreferencesState) -> Element<'_, PreferencesMessage> {
     match state.selected {
         PreferencesPage::UiAppearance => appearance_page(state),
+        PreferencesPage::OracleConnection => {
+            oracle_connection_page(&state.oracle_connection).map(PreferencesMessage::OracleConnection)
+        }
         page => column![
             text(page.label()).size(16),
             text(i18n::t_args(
@@ -284,17 +304,18 @@ fn preferences_page(state: &PreferencesState) -> Element<'_, PreferencesMessage>
 fn appearance_page(state: &PreferencesState) -> Element<'_, PreferencesMessage> {
     let locales_path = i18n::locales_dir().display().to_string();
     column![
-        text(i18n::t("prefs.page.appearance")).size(16),
+        text(i18n::t("prefs.page.appearance")).size(13),
         text(i18n::t("prefs.language"))
-            .size(12)
+            .size(11)
             .color(ui_theme::current().muted),
         pick_list(
             state.available.clone(),
             Some(state.language.clone()),
             PreferencesMessage::LanguageChanged,
         )
-        .padding(8)
-        .width(220),
+        .padding(3)
+        .text_size(12)
+        .width(180),
         text(i18n::t_args(
             "prefs.locales_hint",
             &[("path", &locales_path)],
@@ -302,7 +323,7 @@ fn appearance_page(state: &PreferencesState) -> Element<'_, PreferencesMessage> 
         .size(11)
         .color(ui_theme::current().muted),
     ]
-    .spacing(8)
+    .spacing(4)
     .width(Fill)
     .height(Fill)
     .into()
@@ -320,7 +341,7 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
     let tree = scrollable(preferences_tree(state)).height(Fill);
 
     let page_body = container(preferences_page(state))
-        .padding(16)
+        .padding(10)
         .width(Fill)
         .height(Fill);
 
@@ -381,8 +402,8 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
         rule::horizontal(1).style(|_| rule_style()),
         footer,
     ]
-    .width(720)
-    .height(480);
+    .width(820)
+    .height(560);
 
     let card = container(form).style(|_| container::Style {
         background: Some(Background::Color(ui_theme::current().ribbon_bg)),
@@ -395,6 +416,7 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
         ..container::Style::default()
     });
 
+    // Capture outside clicks; closing is only via Cancel / OK.
     let backdrop = mouse_area(
         container(Space::new().width(Fill).height(Fill))
             .width(Fill)
@@ -404,9 +426,9 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
                 ..container::Style::default()
             }),
     )
-    .on_press(PreferencesMessage::Close);
+    .on_press(PreferencesMessage::Backdrop);
 
-    opaque(
+    let preferences_layer = opaque(
         stack![
             backdrop,
             container(card)
@@ -417,7 +439,21 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
         ]
         .width(Fill)
         .height(Fill),
-    )
+    );
+
+    if let Some(wizard) = &state.oracle_connection.wizard {
+        stack![
+            preferences_layer,
+            oracle_wizard_modal(wizard).map(|message| {
+                PreferencesMessage::OracleConnection(OracleConnectionMessage::Wizard(message))
+            }),
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
+    } else {
+        preferences_layer
+    }
 }
 
 fn preferences_tree(state: &PreferencesState) -> Element<'_, PreferencesMessage> {

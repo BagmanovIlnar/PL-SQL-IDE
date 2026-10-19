@@ -83,6 +83,8 @@ fn run_oracle_spike_blocking(
     request: OracleSpikeRequest,
     timeout_ms: u64,
 ) -> CoreResult<OracleSpikeResult> {
+    super::oracle_connection_prefs::prepare_oracle_client()?;
+
     let started = std::time::Instant::now();
     let sql = request
         .sql
@@ -101,7 +103,7 @@ fn run_oracle_spike_blocking(
         .map_err(|err| CoreError::Connection(err.to_string()))?;
 
     connection
-        .call_timeout(Duration::from_millis(timeout_ms))
+        .set_call_timeout(Some(Duration::from_millis(timeout_ms)))
         .map_err(|err| CoreError::Other(err.to_string()))?;
 
     info!("oracle spike connected");
@@ -154,33 +156,24 @@ fn cancel_long_query(
     connection: &Connection,
     started: std::time::Instant,
 ) -> CoreResult<OracleSpikeResult> {
-    let break_connection = connection
-        .try_clone()
+    // Short call timeout acts as the cancel demo without a second connection handle.
+    connection
+        .set_call_timeout(Some(Duration::from_millis(500)))
         .map_err(|err| CoreError::Other(err.to_string()))?;
-
-    let handle = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(300));
-        break_connection.break_execution()
-    });
 
     let query_result =
         connection.query_as::<i32>("select 1 from dual connect by level <= 100000000", &[]);
-    let cancel_result = handle
-        .join()
-        .map_err(|_| CoreError::Other("oracle cancel thread panicked".into()))?;
 
-    let cancelled = match (query_result, cancel_result) {
-        (Err(err), Ok(())) => {
+    let cancelled = match query_result {
+        Err(err) => {
             let text = err.to_string().to_lowercase();
-            text.contains("cancel") || text.contains("break") || text.contains("ora-01013")
+            text.contains("cancel")
+                || text.contains("break")
+                || text.contains("timeout")
+                || text.contains("ora-01013")
+                || text.contains("dpi-1067")
         }
-        (Ok(_), Ok(())) => true,
-        (Err(err), Err(_)) => {
-            return Err(CoreError::Query(err.to_string()));
-        }
-        (Ok(_), Err(err)) => {
-            return Err(CoreError::Other(err.to_string()));
-        }
+        Ok(_) => false,
     };
 
     Ok(OracleSpikeResult {
