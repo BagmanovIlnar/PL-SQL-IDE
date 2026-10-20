@@ -199,6 +199,7 @@ impl OracleCompilerPrefs {
     ///
     /// let sql = OracleCompilerPrefs::default().alter_session_sql();
     /// assert!(sql.iter().any(|s| s.contains("PLSQL_OPTIMIZE_LEVEL")));
+    /// assert!(!sql.iter().any(|s| s.contains("PLSCOPE_SETTINGS")));
     /// ```
     pub fn alter_session_sql(&self) -> Vec<String> {
         let level = Self::clamp_optimize_level(self.optimize_level);
@@ -208,12 +209,19 @@ impl OracleCompilerPrefs {
                 "ALTER SESSION SET PLSQL_CODE_TYPE = '{}'",
                 self.code_type.as_oracle()
             ),
-            format!(
+        ];
+
+        // Oracle rejects IDENTIFIERS:DEFAULT / STATEMENTS:DEFAULT (ORA-00096).
+        // Leave the session alone when prefs say "Default".
+        if !matches!(self.plscope_identifiers, PlscopeIdentifiers::Default)
+            && !matches!(self.plscope_statements, PlscopeStatements::Default)
+        {
+            stmts.push(format!(
                 "ALTER SESSION SET PLSCOPE_SETTINGS = 'IDENTIFIERS:{} STATEMENTS:{}'",
                 self.plscope_identifiers.as_oracle(),
                 self.plscope_statements.as_oracle()
-            ),
-        ];
+            ));
+        }
 
         if !self.conditional_compilation_flags.is_empty() {
             let flags = self

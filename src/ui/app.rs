@@ -55,6 +55,7 @@ use crate::core::oracle_debug::{self, DebugEngineEvent, DebugEngineRequest};
 use crate::core::oracle_debugger_prefs::{self, DebugSystem};
 use crate::core::oracle_pool;
 use crate::core::postgres_spike::{run_postgres_spike, PostgresSpikeRequest};
+use crate::core::connections_store::{self, ConnectionsStore};
 use crate::core::{ConnectionId, ConnectionProfile, DbKind};
 use crate::ui::completion::{suggest_keywords, word_prefix_at};
 use crate::ui::debug_toolbar::{debug_toolbar, DebugToolbarMessage};
@@ -438,14 +439,12 @@ enum Message {
 
 impl App {
     fn new() -> Self {
-        let mut local = ConnectionProfile::new("Local PostgreSQL", DbKind::Postgres);
-        local.username = "postgres".into();
-        local.password = "postgres".into();
+        let stored = connections_store::load();
+        let selected_connection = stored
+            .selected
+            .filter(|id| stored.connections.iter().any(|item| item.id == *id))
+            .or_else(|| stored.connections.first().map(|item| item.id));
 
-        let mut oracle = ConnectionProfile::new("Local Oracle", DbKind::Oracle);
-        oracle.username = "scott".into();
-
-        let selected = local.id;
         ui_theme::apply(ThemeMode::System);
         Self {
             worksheets: Vec::new(),
@@ -453,8 +452,8 @@ impl App {
             ribbon_tab: RibbonTab::File,
             ribbon_hover: None,
             theme_mode: ThemeMode::System,
-            connections: vec![local, oracle],
-            selected_connection: Some(selected),
+            connections: stored.connections,
+            selected_connection,
             connection_status: HashMap::new(),
             connect_error: None,
             dialog: None,
@@ -484,6 +483,14 @@ impl App {
             debug_system: oracle_debugger_prefs::load().default_debug_system,
             close_confirm: None,
         }
+    }
+
+    /// Write Connections list + selection to `{config}/connections.json`.
+    fn persist_connections(&self) {
+        connections_store::save(&ConnectionsStore {
+            connections: self.connections.clone(),
+            selected: self.selected_connection,
+        });
     }
 
     fn active_content_mut(&mut self) -> Option<&mut Content> {
@@ -1121,6 +1128,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::MenuExecute => run_spike(app),
         Message::SelectConnection(id) => {
             app.selected_connection = Some(id);
+            app.persist_connections();
             if let Some(profile) = app.selected_profile() {
                 app.metrics =
                     i18n::t_args("status.selected_connection", &[("name", profile.name.as_str())]);
@@ -1163,6 +1171,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.clear_object_browser();
             }
             app.selected_connection = app.connections.first().map(|item| item.id);
+            app.persist_connections();
             app.metrics = i18n::t("status.connection_deleted");
             if app.selected_is_connected() {
                 start_load_object_roots(app)
@@ -1304,6 +1313,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.selected_connection = Some(id);
                     app.dialog = None;
                     app.dialog_error = None;
+                    app.persist_connections();
                 }
                 Err(error) => {
                     app.dialog_error = Some(error);
@@ -2336,16 +2346,14 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
         ..container::Style::default()
     });
 
-    let backdrop = mouse_area(
-        container(Space::new().width(Fill).height(Fill))
-            .width(Fill)
-            .height(Fill)
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
-                ..container::Style::default()
-            }),
-    )
-    .on_press(Message::DialogCancel);
+    // Dim background only — do not close on outside click (Cancel / Save only).
+    let backdrop = container(Space::new().width(Fill).height(Fill))
+        .width(Fill)
+        .height(Fill)
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
+            ..container::Style::default()
+        });
 
     opaque(
         stack![

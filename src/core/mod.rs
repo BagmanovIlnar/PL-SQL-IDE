@@ -1,6 +1,7 @@
 //! Application core: shared DB types and Phase 0 connection spikes.
 
 pub mod connection_profile;
+pub mod connections_store;
 pub mod db_kind;
 pub mod error;
 pub mod object_metadata;

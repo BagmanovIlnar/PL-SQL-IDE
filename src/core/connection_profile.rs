@@ -34,20 +34,23 @@ pub struct ConnectionProfile {
 }
 
 impl ConnectionProfile {
-    /// Creates a profile with dialect defaults for host/port.
+    /// Creates an empty profile with only the dialect default port filled in.
+    ///
+    /// Host / database / credentials stay blank so the user enters real values
+    /// (no seeded localhost demos).
     pub fn new(name: impl Into<String>, db_kind: DbKind) -> Self {
-        let (host, port, database) = match db_kind {
-            DbKind::Postgres => ("127.0.0.1".into(), 5432, "postgres".into()),
-            DbKind::Oracle => ("127.0.0.1".into(), 1521, "XEPDB1".into()),
+        let port = match db_kind {
+            DbKind::Postgres => 5432,
+            DbKind::Oracle => 1521,
         };
 
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
             db_kind,
-            host,
+            host: String::new(),
             port,
-            database,
+            database: String::new(),
             username: String::new(),
             password: String::new(),
         }
