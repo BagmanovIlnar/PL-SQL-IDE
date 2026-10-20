@@ -8,7 +8,7 @@ Stack for MVP:
 - `iced::widget::text_editor` + highlighter for SQL/PLSQL editing
 - `iced_aw` будет добавлен позже для tabs/menus
 - PostgreSQL via `sqlx`
-- Oracle via `oracle` crate (optional feature, user-installed Oracle Client)
+- Oracle via `oracle` crate (enabled by default; Instant Client required at runtime)
 
 Product plan: [`plan.md`](./plan.md)
 
@@ -19,7 +19,7 @@ Phase 0 validates the technology gate:
 - iced application window with ribbon shell
 - SQL editor with completion and line numbers
 - PostgreSQL connect / query / cancel spike
-- Oracle spike behind `--features oracle`
+- Oracle + PostgreSQL in the default feature set
 - CI matrix for Linux, Windows and macOS
 
 ## Release packages
@@ -37,13 +37,13 @@ Triggers:
 - push a version tag: `git tag v0.1.0 && git push origin v0.1.0` (also creates a GitHub Release)
 - **Actions → Release packages → Run workflow** (artifacts only)
 
-Oracle Instant Client is **not** linked in CI builds (`--features postgres` only).
+Release binaries include PostgreSQL and Oracle support by default. Oracle Instant Client is **not** bundled — install it on the machine to connect to Oracle.
 
 ## Prerequisites
 
 - Rust 1.90+
-- PostgreSQL for the Postgres spike
-- Oracle Instant Client only when building/running with `--features oracle`
+- PostgreSQL for the Postgres spike (optional for compile)
+- Oracle Instant Client on the machine when connecting to Oracle (runtime)
 
 ### Linux system packages (Debian/Ubuntu)
 
@@ -65,18 +65,28 @@ In the app:
 2. Edit SQL in the worksheet and use **Session → Execute**.
 3. Change theme under **Settings** if needed.
 
-## Oracle feature
+## Build / install
+
+Default features enable both databases — no `--features` needed:
 
 ```bash
-cargo run --features "postgres,oracle"
+cargo run
+cargo build --release
+cargo install --path .
+```
+
+Postgres-only (no Oracle crate):
+
+```bash
+cargo build --no-default-features --features postgres
 ```
 
 ## Tests
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --features postgres -- -D warnings
-cargo test --features postgres
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
 ## Architecture notes

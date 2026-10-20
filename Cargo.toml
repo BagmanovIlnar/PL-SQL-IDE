@@ -13,7 +13,8 @@ keywords = ["oracle", "plsql", "postgresql", "ide", "sql"]
 categories = ["development-tools"]
 
 [features]
-default = ["postgres"]
+# Both engines on by default: `cargo build` / `cargo install` need no --features.
+default = ["postgres", "oracle"]
 postgres = []
 oracle = ["dep:oracle"]
 

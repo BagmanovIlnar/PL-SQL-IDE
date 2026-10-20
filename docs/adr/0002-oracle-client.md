@@ -10,14 +10,16 @@ The Rust `oracle` crate depends on ODPI-C and a local Oracle Client. Bundling In
 
 ## Decision
 
-1. Default builds enable PostgreSQL only (`--features postgres`).
-2. Oracle support is compiled with `--features oracle`.
+1. Default builds enable **both** PostgreSQL and Oracle (`default = ["postgres", "oracle"]`).
+   Plain `cargo build` / `cargo install plsqlide` / CI release packages need **no** `--features`.
+2. The `oracle` crate (ODPI-C) links at build time without Instant Client; the client is loaded at **runtime**.
 3. The application discovers a user-installed Oracle Client and shows a diagnostic screen when it is missing.
 4. Bundling Instant Client is deferred until legal review is completed.
+5. Opt-out remains possible: `cargo build --no-default-features --features postgres`.
 
 ## Consequences
 
-- CI can validate the common path without Instant Client
-- Oracle users must install a compatible client once
+- One binary supports all wired databases by default
+- Oracle users must still install a compatible Instant Client to connect
 - Packaging docs must include Client setup for each OS
 - A later ADR may allow optional bundling after legal approval

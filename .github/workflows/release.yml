@@ -69,7 +69,7 @@ jobs:
           EOF
 
       - name: Build release
-        run: cargo build --release --features postgres
+        run: cargo build --release
 
       - name: Package
         shell: pwsh
@@ -121,7 +121,7 @@ jobs:
           tool: cargo-deb,cargo-generate-rpm
 
       - name: Build release
-        run: cargo build --release --features postgres
+        run: cargo build --release
 
       - name: Package tar.gz
         env:
@@ -192,7 +192,7 @@ jobs:
       - name: Build release
         env:
           MACOSX_DEPLOYMENT_TARGET: "11.0"
-        run: cargo build --release --features postgres --target aarch64-apple-darwin
+        run: cargo build --release --target aarch64-apple-darwin
 
       - name: Bundle zip + dmg
         env:
