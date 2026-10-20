@@ -41,7 +41,7 @@ Oracle Instant Client is **not** linked in CI builds (`--features postgres` only
 
 ## Prerequisites
 
-- Rust 1.88+
+- Rust 1.90+
 - PostgreSQL for the Postgres spike
 - Oracle Instant Client only when building/running with `--features oracle`
 
