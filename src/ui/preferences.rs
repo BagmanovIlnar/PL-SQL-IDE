@@ -12,6 +12,9 @@ use iced::widget::{
 use iced::{Background, Color, Element, Fill, Padding};
 
 use crate::ui::i18n::{self, LocaleInfo};
+use crate::ui::oracle_options::{
+    oracle_options_page, OracleOptionsForm, OracleOptionsMessage,
+};
 use crate::ui::oracle_prefs::{
     oracle_connection_page, OracleConnectionForm, OracleConnectionMessage,
 };
@@ -162,6 +165,8 @@ pub struct PreferencesState {
     pub available: Vec<LocaleInfo>,
     /// Draft Oracle → Connection form (saved on OK).
     pub oracle_connection: OracleConnectionForm,
+    /// Draft Oracle → Options form (saved on OK).
+    pub oracle_options: OracleOptionsForm,
     /// Sections whose children are visible in the tree.
     expanded: Vec<PreferencesSection>,
 }
@@ -185,6 +190,7 @@ impl PreferencesState {
             language,
             available,
             oracle_connection: OracleConnectionForm::load(),
+            oracle_options: OracleOptionsForm::load(),
             expanded: vec![
                 PreferencesSection::UserInterface,
                 PreferencesSection::Oracle,
@@ -232,6 +238,8 @@ pub enum PreferencesMessage {
     LanguageChanged(LocaleInfo),
     /// Oracle → Connection page controls.
     OracleConnection(OracleConnectionMessage),
+    /// Oracle → Options page controls.
+    OracleOptions(OracleOptionsMessage),
     /// Close without applying (Cancel only — not backdrop).
     Close,
     /// Outside click on the dimmed layer; ignored so the dialog stays open.
@@ -263,11 +271,16 @@ impl PreferencesState {
                 self.oracle_connection.update(message);
                 false
             }
+            PreferencesMessage::OracleOptions(message) => {
+                self.oracle_options.update(message);
+                false
+            }
             PreferencesMessage::Backdrop => false,
             PreferencesMessage::Close => true,
             PreferencesMessage::Ok => {
                 let _ = i18n::set_locale(&self.language.code);
                 self.oracle_connection.save();
+                self.oracle_options.save();
                 true
             }
         }
@@ -280,6 +293,9 @@ fn preferences_page(state: &PreferencesState) -> Element<'_, PreferencesMessage>
         PreferencesPage::UiAppearance => appearance_page(state),
         PreferencesPage::OracleConnection => {
             oracle_connection_page(&state.oracle_connection).map(PreferencesMessage::OracleConnection)
+        }
+        PreferencesPage::OracleOptions => {
+            oracle_options_page(&state.oracle_options).map(PreferencesMessage::OracleOptions)
         }
         page => column![
             text(page.label()).size(16),

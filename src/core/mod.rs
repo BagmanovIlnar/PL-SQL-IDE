@@ -5,6 +5,7 @@ pub mod db_kind;
 pub mod error;
 pub mod object_metadata;
 pub mod oracle_connection_prefs;
+pub mod oracle_options_prefs;
 pub mod postgres_spike;
 
 #[cfg(feature = "oracle")]
@@ -15,4 +16,7 @@ pub use db_kind::DbKind;
 pub use error::{CoreError, CoreResult};
 pub use oracle_connection_prefs::{
     OracleConnectionPrefs, OracleEnvVar, OracleSessionMode,
+};
+pub use oracle_options_prefs::{
+    OracleOptionsPrefs, ViewColumnAliasPolicy, ViewForcePolicy,
 };
