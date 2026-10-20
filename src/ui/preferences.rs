@@ -1,7 +1,8 @@
 //! Preferences modal: left tree navigation, right page content.
 //!
 //! Appearance hosts the Language combo backed by JSON locales from
-//! [`crate::ui::i18n`]. Other Oracle pages remain stubs for now.
+//! [`crate::ui::i18n`]. Oracle Connection / Options / Compiler are implemented;
+//! other Oracle pages remain stubs for now.
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Border;
@@ -12,6 +13,9 @@ use iced::widget::{
 use iced::{Background, Color, Element, Fill, Padding};
 
 use crate::ui::i18n::{self, LocaleInfo};
+use crate::ui::oracle_compiler::{
+    oracle_compiler_editor_modal, oracle_compiler_page, OracleCompilerForm, OracleCompilerMessage,
+};
 use crate::ui::oracle_options::{
     oracle_options_page, OracleOptionsForm, OracleOptionsMessage,
 };
@@ -167,6 +171,8 @@ pub struct PreferencesState {
     pub oracle_connection: OracleConnectionForm,
     /// Draft Oracle → Options form (saved on OK).
     pub oracle_options: OracleOptionsForm,
+    /// Draft Oracle → Compiler form (saved on OK).
+    pub oracle_compiler: OracleCompilerForm,
     /// Sections whose children are visible in the tree.
     expanded: Vec<PreferencesSection>,
 }
@@ -191,6 +197,7 @@ impl PreferencesState {
             available,
             oracle_connection: OracleConnectionForm::load(),
             oracle_options: OracleOptionsForm::load(),
+            oracle_compiler: OracleCompilerForm::load(),
             expanded: vec![
                 PreferencesSection::UserInterface,
                 PreferencesSection::Oracle,
@@ -240,6 +247,8 @@ pub enum PreferencesMessage {
     OracleConnection(OracleConnectionMessage),
     /// Oracle → Options page controls.
     OracleOptions(OracleOptionsMessage),
+    /// Oracle → Compiler page controls.
+    OracleCompiler(OracleCompilerMessage),
     /// Close without applying (Cancel only — not backdrop).
     Close,
     /// Outside click on the dimmed layer; ignored so the dialog stays open.
@@ -275,12 +284,17 @@ impl PreferencesState {
                 self.oracle_options.update(message);
                 false
             }
+            PreferencesMessage::OracleCompiler(message) => {
+                self.oracle_compiler.update(message);
+                false
+            }
             PreferencesMessage::Backdrop => false,
             PreferencesMessage::Close => true,
             PreferencesMessage::Ok => {
                 let _ = i18n::set_locale(&self.language.code);
                 self.oracle_connection.save();
                 self.oracle_options.save();
+                self.oracle_compiler.save();
                 true
             }
         }
@@ -296,6 +310,9 @@ fn preferences_page(state: &PreferencesState) -> Element<'_, PreferencesMessage>
         }
         PreferencesPage::OracleOptions => {
             oracle_options_page(&state.oracle_options).map(PreferencesMessage::OracleOptions)
+        }
+        PreferencesPage::OracleCompiler => {
+            oracle_compiler_page(&state.oracle_compiler).map(PreferencesMessage::OracleCompiler)
         }
         page => column![
             text(page.label()).size(16),
@@ -457,18 +474,26 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
         .height(Fill),
     );
 
+    let mut layers = vec![preferences_layer];
+
     if let Some(wizard) = &state.oracle_connection.wizard {
-        stack![
-            preferences_layer,
-            oracle_wizard_modal(wizard).map(|message| {
-                PreferencesMessage::OracleConnection(OracleConnectionMessage::Wizard(message))
-            }),
-        ]
-        .width(Fill)
-        .height(Fill)
-        .into()
+        layers.push(
+            oracle_wizard_modal(wizard)
+                .map(|message| {
+                    PreferencesMessage::OracleConnection(OracleConnectionMessage::Wizard(message))
+                })
+                .into(),
+        );
+    }
+
+    if let Some(editor) = oracle_compiler_editor_modal(&state.oracle_compiler) {
+        layers.push(editor.map(PreferencesMessage::OracleCompiler).into());
+    }
+
+    if layers.len() == 1 {
+        layers.remove(0)
     } else {
-        preferences_layer
+        stack(layers).width(Fill).height(Fill).into()
     }
 }
 

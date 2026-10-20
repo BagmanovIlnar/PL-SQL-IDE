@@ -106,6 +106,8 @@ fn run_oracle_spike_blocking(
         .set_call_timeout(Some(Duration::from_millis(timeout_ms)))
         .map_err(|err| CoreError::Other(err.to_string()))?;
 
+    super::oracle_compiler_prefs::apply_to_connection(&connection)?;
+
     info!("oracle spike connected");
 
     if request.cancel {
