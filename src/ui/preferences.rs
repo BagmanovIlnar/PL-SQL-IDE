@@ -1,8 +1,8 @@
 //! Preferences modal: left tree navigation, right page content.
 //!
 //! Appearance hosts the Language combo backed by JSON locales from
-//! [`crate::ui::i18n`]. Oracle Connection / Options / Compiler are implemented;
-//! other Oracle pages remain stubs for now.
+//! [`crate::ui::i18n`]. Oracle Connection / Options / Compiler / Debugger are
+//! implemented; other Oracle pages remain stubs for now.
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Border;
@@ -15,6 +15,9 @@ use iced::{Background, Color, Element, Fill, Padding};
 use crate::ui::i18n::{self, LocaleInfo};
 use crate::ui::oracle_compiler::{
     oracle_compiler_editor_modal, oracle_compiler_page, OracleCompilerForm, OracleCompilerMessage,
+};
+use crate::ui::oracle_debugger::{
+    oracle_debugger_page, OracleDebuggerForm, OracleDebuggerMessage,
 };
 use crate::ui::oracle_options::{
     oracle_options_page, OracleOptionsForm, OracleOptionsMessage,
@@ -173,6 +176,8 @@ pub struct PreferencesState {
     pub oracle_options: OracleOptionsForm,
     /// Draft Oracle → Compiler form (saved on OK).
     pub oracle_compiler: OracleCompilerForm,
+    /// Draft Oracle → Debugger form (saved on OK).
+    pub oracle_debugger: OracleDebuggerForm,
     /// Sections whose children are visible in the tree.
     expanded: Vec<PreferencesSection>,
 }
@@ -198,6 +203,7 @@ impl PreferencesState {
             oracle_connection: OracleConnectionForm::load(),
             oracle_options: OracleOptionsForm::load(),
             oracle_compiler: OracleCompilerForm::load(),
+            oracle_debugger: OracleDebuggerForm::load(),
             expanded: vec![
                 PreferencesSection::UserInterface,
                 PreferencesSection::Oracle,
@@ -249,6 +255,8 @@ pub enum PreferencesMessage {
     OracleOptions(OracleOptionsMessage),
     /// Oracle → Compiler page controls.
     OracleCompiler(OracleCompilerMessage),
+    /// Oracle → Debugger page controls.
+    OracleDebugger(OracleDebuggerMessage),
     /// Close without applying (Cancel only — not backdrop).
     Close,
     /// Outside click on the dimmed layer; ignored so the dialog stays open.
@@ -288,6 +296,10 @@ impl PreferencesState {
                 self.oracle_compiler.update(message);
                 false
             }
+            PreferencesMessage::OracleDebugger(message) => {
+                self.oracle_debugger.update(message);
+                false
+            }
             PreferencesMessage::Backdrop => false,
             PreferencesMessage::Close => true,
             PreferencesMessage::Ok => {
@@ -295,6 +307,7 @@ impl PreferencesState {
                 self.oracle_connection.save();
                 self.oracle_options.save();
                 self.oracle_compiler.save();
+                self.oracle_debugger.save();
                 true
             }
         }
@@ -313,6 +326,9 @@ fn preferences_page(state: &PreferencesState) -> Element<'_, PreferencesMessage>
         }
         PreferencesPage::OracleCompiler => {
             oracle_compiler_page(&state.oracle_compiler).map(PreferencesMessage::OracleCompiler)
+        }
+        PreferencesPage::OracleDebugger => {
+            oracle_debugger_page(&state.oracle_debugger).map(PreferencesMessage::OracleDebugger)
         }
         page => column![
             text(page.label()).size(16),

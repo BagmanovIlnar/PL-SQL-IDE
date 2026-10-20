@@ -1,12 +1,13 @@
 //! IDE shell: menu, Connections/Objects, worksheets, completion, connection modal.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Border;
 use iced::keyboard::key::Named;
-use iced::keyboard::Key;
+use iced::keyboard::{self, Key, Modifiers};
 use iced::mouse;
 use iced::widget::operation::focus as focus_widget;
 use iced::widget::text_editor::{Action, Binding, Content, Edit};
@@ -14,8 +15,8 @@ use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, row, rule, scrollable,
     stack, text, text_editor, text_input, tooltip, Space,
 };
-use iced::{Background, Color, Element, Fill, Font, Padding, Point, Task, Theme};
-use iced_fonts::lucide::{pencil, plug, plus, trash};
+use iced::{Background, Color, Element, Event, Fill, Font, Padding, Point, Subscription, Task, Theme};
+use iced_fonts::lucide::{database, pencil, plug, plus, trash};
 use iced_fonts::LUCIDE_FONT_BYTES;
 
 /// Stable widget id so the editor can keep / regain keyboard focus while the
@@ -48,10 +49,15 @@ const SIDEBAR_WIDTH_MAX: f32 = 640.0;
 use iced_aw::menu::{DrawPath, Item, Menu, MenuBar};
 use iced_aw::style::menu_bar as menu_bar_style;
 
+use crate::core::debug_session::{Breakpoint, DebugCommand, DebugSession};
 use crate::core::object_metadata::{list_objects, list_owners, ObjectKind, ObjectOwnerList};
+use crate::core::oracle_debug::{self, DebugEngineEvent, DebugEngineRequest};
+use crate::core::oracle_debugger_prefs::{self, DebugSystem};
+use crate::core::oracle_pool;
 use crate::core::postgres_spike::{run_postgres_spike, PostgresSpikeRequest};
 use crate::core::{ConnectionId, ConnectionProfile, DbKind};
 use crate::ui::completion::{suggest_keywords, word_prefix_at};
+use crate::ui::debug_toolbar::{debug_toolbar, DebugToolbarMessage};
 use crate::ui::parameters::{
     parameters_view, value_editor_modal, ParamMessage, ParametersPanel, ValueEditorDraft,
     PANEL_HEIGHT, PANEL_HEIGHT_MAX, PANEL_HEIGHT_MIN,
@@ -73,6 +79,7 @@ pub fn run() -> iced::Result {
                 Theme::Light
             }
         })
+        .subscription(subscription)
         .font(LUCIDE_FONT_BYTES)
         .centered()
         .window_size((1400.0, 900.0))
@@ -113,6 +120,41 @@ struct Worksheet {
     parameters: ParametersPanel,
     /// Connection selected in Connections when this worksheet was created.
     connection_id: Option<ConnectionId>,
+    /// Source breakpoints (1-based line numbers).
+    breakpoints: HashSet<usize>,
+    /// Disk path after Save / Save As (None = never saved).
+    file_path: Option<PathBuf>,
+    /// True when buffer differs from last save (or was edited and never saved).
+    dirty: bool,
+}
+
+impl Worksheet {
+    fn tab_label(&self) -> String {
+        let name = self
+            .file_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.kind.tab_title());
+        if self.dirty {
+            format!("{name} *")
+        } else {
+            name
+        }
+    }
+
+    /// Closing needs a Save / Don't save / Cancel prompt.
+    fn needs_save_prompt(&self) -> bool {
+        self.dirty || self.file_path.is_none()
+    }
+}
+
+/// Result of attempting to persist a worksheet to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveOutcome {
+    Saved,
+    Cancelled,
+    Failed,
 }
 
 /// Live connectivity state for a saved profile in the Connections list.
@@ -302,6 +344,12 @@ struct App {
     parameters_height: f32,
     /// Active panel-border drag, if any.
     resize_drag: Option<ResizeDrag>,
+    /// Oracle debug session controller (toolbar / hotkeys).
+    debug_session: DebugSession,
+    /// Debug system selected in the toolbar combobox.
+    debug_system: DebugSystem,
+    /// Tab index waiting for Save / Don't save / Cancel before close.
+    close_confirm: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +374,12 @@ enum Message {
     },
     SelectTab(usize),
     CloseTab(usize),
+    /// Save the pending tab, then close it.
+    CloseTabSave,
+    /// Discard changes and close the pending tab.
+    CloseTabDiscard,
+    /// Keep the pending tab open.
+    CloseTabCancel,
     SelectRibbonTab(RibbonTab),
     RibbonHover(Option<RibbonHoverTarget>),
     SetThemeMode(ThemeMode),
@@ -374,6 +428,12 @@ enum Message {
     ResizeMove(Point),
     /// End a panel resize drag (left mouse button released).
     ResizeEnd,
+    /// Toggle a breakpoint on the given 1-based line in the active worksheet.
+    ToggleBreakpoint(usize),
+    /// Debug toolbar actions.
+    Debug(DebugToolbarMessage),
+    /// Async result from the live Oracle debug engine.
+    DebugEngineFinished(Result<DebugEngineEvent, String>),
 }
 
 impl App {
@@ -388,13 +448,7 @@ impl App {
         let selected = local.id;
         ui_theme::apply(ThemeMode::System);
         Self {
-            worksheets: vec![Worksheet {
-                kind: WindowKind::Sql,
-                content: Content::with_text(WindowKind::Sql.template()),
-                scroll_y: 0.0,
-                parameters: ParametersPanel::default(),
-                connection_id: Some(selected),
-            }],
+            worksheets: Vec::new(),
             active_tab: 0,
             ribbon_tab: RibbonTab::File,
             ribbon_hover: None,
@@ -426,6 +480,9 @@ impl App {
             sidebar_width: SIDEBAR_WIDTH_DEFAULT,
             parameters_height: PANEL_HEIGHT,
             resize_drag: None,
+            debug_session: DebugSession::default(),
+            debug_system: oracle_debugger_prefs::load().default_debug_system,
+            close_confirm: None,
         }
     }
 
@@ -479,10 +536,14 @@ impl App {
             scroll_y: 0.0,
             parameters: ParametersPanel::default(),
             connection_id,
+            breakpoints: HashSet::new(),
+            file_path: None,
+            dirty: false,
         });
         self.active_tab = self.worksheets.len() - 1;
         self.completion.clear();
         self.value_editor = None;
+        self.close_confirm = None;
         let kind_title = kind.tab_title();
         self.metrics = i18n::t_args(
             "status.opened",
@@ -491,6 +552,158 @@ impl App {
                 ("connection", connection_label.as_str()),
             ],
         );
+    }
+
+    /// Removes a worksheet tab and fixes `active_tab` (may leave the workspace empty).
+    fn remove_worksheet(&mut self, index: usize) {
+        if index >= self.worksheets.len() {
+            return;
+        }
+        self.worksheets.remove(index);
+        if self.worksheets.is_empty() {
+            self.active_tab = 0;
+        } else if self.active_tab >= self.worksheets.len() {
+            self.active_tab = self.worksheets.len() - 1;
+        } else if index < self.active_tab {
+            self.active_tab -= 1;
+        }
+        self.completion.clear();
+        self.value_editor = None;
+        self.close_confirm = None;
+    }
+
+    /// Persist worksheet `index` to disk. Uses Save As when `force_save_as` or no path yet.
+    fn save_worksheet_at(&mut self, index: usize, force_save_as: bool) -> SaveOutcome {
+        let Some(sheet) = self.worksheets.get(index) else {
+            return SaveOutcome::Cancelled;
+        };
+        let text = sheet.content.text();
+        let suggested = sheet
+            .file_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| default_file_name(sheet.kind));
+
+        let path = if force_save_as || sheet.file_path.is_none() {
+            let ext = file_extension(sheet.kind);
+            let picked = rfd::FileDialog::new()
+                .set_title(i18n::t("dialog.save.title"))
+                .set_file_name(&suggested)
+                .add_filter(i18n::t("dialog.save.filter"), &[ext])
+                .add_filter(i18n::t("dialog.save.filter_all"), &["*"])
+                .save_file();
+            match picked {
+                Some(path) => path,
+                None => return SaveOutcome::Cancelled,
+            }
+        } else {
+            sheet.file_path.clone().expect("path checked")
+        };
+
+        match std::fs::write(&path, text.as_bytes()) {
+            Ok(()) => {
+                if let Some(sheet) = self.worksheets.get_mut(index) {
+                    sheet.file_path = Some(path.clone());
+                    sheet.dirty = false;
+                }
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                self.metrics = i18n::t_args("status.saved", &[("name", name.as_str())]);
+                SaveOutcome::Saved
+            }
+            Err(error) => {
+                self.metrics = i18n::t_args(
+                    "status.save_failed",
+                    &[("error", error.to_string().as_str())],
+                );
+                SaveOutcome::Failed
+            }
+        }
+    }
+
+    fn save_active_worksheet(&mut self, force_save_as: bool) -> SaveOutcome {
+        if self.worksheets.is_empty() {
+            self.metrics = i18n::t("status.no_worksheet");
+            return SaveOutcome::Cancelled;
+        }
+        self.save_worksheet_at(self.active_tab, force_save_as)
+    }
+
+    fn connection_key(&self) -> String {
+        self.active_worksheet_profile()
+            .map(|profile| format!("{}@{}", profile.username, profile.database))
+            .unwrap_or_else(|| "user@db".into())
+    }
+
+    fn sync_session_breakpoints_from_sheet(&mut self) {
+        let bps = self
+            .worksheets
+            .get(self.active_tab)
+            .map(|sheet| {
+                let mut list: Vec<_> = sheet
+                    .breakpoints
+                    .iter()
+                    .copied()
+                    .map(|line| Breakpoint { line })
+                    .collect();
+                list.sort_by_key(|b| b.line);
+                list
+            })
+            .unwrap_or_default();
+        self.debug_session.breakpoints = bps;
+    }
+
+    fn apply_debug_command(&mut self, command: DebugCommand) -> Task<Message> {
+        self.sync_session_breakpoints_from_sheet();
+        if let Some(sheet) = self.worksheets.get(self.active_tab) {
+            let line = ((sheet.scroll_y / EDITOR_LINE_HEIGHT).floor() as usize) + 1;
+            self.debug_session.cursor_line = Some(line.max(1));
+        }
+
+        let Some(profile) = self.active_worksheet_profile().cloned() else {
+            self.metrics = i18n::t("status.no_worksheet_connection");
+            self.last_output = i18n::t("status.no_worksheet_connection");
+            return Task::none();
+        };
+        if profile.db_kind != DbKind::Oracle {
+            self.last_output = i18n::t("debug.need_oracle");
+            self.metrics = i18n::t("debug.need_oracle");
+            return Task::none();
+        }
+        if self.busy {
+            return Task::none();
+        }
+
+        let prefs = oracle_debugger_prefs::load();
+        let key = self.connection_key();
+        let source = self
+            .active_content()
+            .map(|c| c.text())
+            .unwrap_or_default();
+        let request = DebugEngineRequest {
+            profile,
+            command,
+            prefs,
+            breakpoints: self.debug_session.breakpoints.clone(),
+            cursor_line: self.debug_session.cursor_line,
+            source,
+            connection_key: key,
+        };
+
+        self.busy = true;
+        self.metrics = i18n::t("debug.working");
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || oracle_debug::run_debug_command(request))
+                    .await
+                    .map_err(|err| err.to_string())
+                    .and_then(|r| r.map_err(|err| err.to_string()))
+            },
+            Message::DebugEngineFinished,
+        )
     }
 
     fn active_parameters_mut(&mut self) -> Option<&mut ParametersPanel> {
@@ -686,6 +899,9 @@ impl App {
             content.perform(Action::Edit(Edit::Backspace));
         }
         content.perform(Action::Edit(Edit::Paste(Arc::new(word))));
+        if let Some(sheet) = self.worksheets.get_mut(self.active_tab) {
+            sheet.dirty = true;
+        }
         self.completion.clear();
         self.completion_prefix.clear();
         self.selected_completion = 0;
@@ -701,6 +917,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
 
+            let marks_dirty = matches!(action, Action::Edit(_));
             let mut restored_empty = false;
             if let Some(content) = app.active_content_mut() {
                 content.perform(action);
@@ -710,6 +927,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 if content.is_empty() {
                     *content = Content::new();
                     restored_empty = true;
+                }
+            }
+            if marks_dirty || restored_empty {
+                if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                    sheet.dirty = true;
                 }
             }
             if restored_empty {
@@ -756,13 +978,14 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.toggle_expanded(key);
             }
             if let Some(name) = insert_name {
-                if let Some(content) = app.active_content_mut() {
-                    let mut current = content.text();
+                if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                    let mut current = sheet.content.text();
                     if !current.ends_with('\n') && !current.is_empty() {
                         current.push(' ');
                     }
                     current.push_str(&name);
-                    *content = Content::with_text(&current);
+                    sheet.content = Content::with_text(&current);
+                    sheet.dirty = true;
                     app.metrics = i18n::t_args("status.inserted", &[("name", name.as_str())]);
                     app.completion.clear();
                 }
@@ -847,17 +1070,35 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::CloseTab(index) => {
-            if app.worksheets.len() <= 1 || index >= app.worksheets.len() {
+            if index >= app.worksheets.len() {
                 return Task::none();
             }
-            app.worksheets.remove(index);
-            if app.active_tab >= app.worksheets.len() {
-                app.active_tab = app.worksheets.len() - 1;
-            } else if index < app.active_tab {
-                app.active_tab -= 1;
+            if app.worksheets[index].needs_save_prompt() {
+                app.active_tab = index;
+                app.close_confirm = Some(index);
+                return Task::none();
             }
-            app.completion.clear();
-            app.value_editor = None;
+            app.remove_worksheet(index);
+            Task::none()
+        }
+        Message::CloseTabSave => {
+            let Some(index) = app.close_confirm else {
+                return Task::none();
+            };
+            match app.save_worksheet_at(index, false) {
+                SaveOutcome::Saved => app.remove_worksheet(index),
+                SaveOutcome::Cancelled | SaveOutcome::Failed => {}
+            }
+            Task::none()
+        }
+        Message::CloseTabDiscard => {
+            if let Some(index) = app.close_confirm.take() {
+                app.remove_worksheet(index);
+            }
+            Task::none()
+        }
+        Message::CloseTabCancel => {
+            app.close_confirm = None;
             Task::none()
         }
         Message::MenuNew(kind) => {
@@ -869,11 +1110,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::MenuSaveStub => {
-            app.metrics = i18n::t("status.save_stub");
+            let _ = app.save_active_worksheet(false);
             Task::none()
         }
         Message::MenuSaveAsStub => {
-            app.metrics = i18n::t("status.save_as_stub");
+            let _ = app.save_active_worksheet(true);
             Task::none()
         }
         Message::MenuExit => iced::exit(),
@@ -910,6 +1151,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.metrics = i18n::t("status.select_to_delete");
                 return Task::none();
             };
+            oracle_pool::close(id);
             app.connections.retain(|item| item.id != id);
             app.connection_status.remove(&id);
             for sheet in &mut app.worksheets {
@@ -936,6 +1178,16 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 Ok(()) => {
                     app.connection_status.insert(id, ConnectionStatus::Connected);
                     app.connect_error = None;
+                    if let Some(profile) = app.connections.iter().find(|item| item.id == id).cloned()
+                    {
+                        if profile.db_kind == DbKind::Oracle {
+                            if let Err(err) = oracle_pool::open_target(&profile) {
+                                app.last_output = format!(
+                                    "Connected, but persistent Oracle session failed: {err}"
+                                );
+                            }
+                        }
+                    }
                     let name = app
                         .connections
                         .iter()
@@ -1127,6 +1379,91 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.resize_drag = None;
             Task::none()
         }
+        Message::ToggleBreakpoint(line) => {
+            if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                if !sheet.breakpoints.remove(&line) {
+                    sheet.breakpoints.insert(line);
+                }
+            }
+            Task::none()
+        }
+        Message::Debug(message) => match message {
+            DebugToolbarMessage::Start => {
+                app.apply_debug_command(DebugCommand::Start(app.debug_system))
+            }
+            DebugToolbarMessage::StartWith(system) => {
+                app.debug_system = system;
+                app.apply_debug_command(DebugCommand::Start(system))
+            }
+            DebugToolbarMessage::Run => app.apply_debug_command(DebugCommand::Run),
+            DebugToolbarMessage::StepInto => app.apply_debug_command(DebugCommand::StepInto),
+            DebugToolbarMessage::StepOver => app.apply_debug_command(DebugCommand::StepOver),
+            DebugToolbarMessage::StepOut => app.apply_debug_command(DebugCommand::StepOut),
+            DebugToolbarMessage::RunToCursor => {
+                app.apply_debug_command(DebugCommand::RunToCursor)
+            }
+            DebugToolbarMessage::RunToNextException => {
+                app.apply_debug_command(DebugCommand::RunToNextException)
+            }
+            DebugToolbarMessage::ExecuteSqlInDebugSession => {
+                app.apply_debug_command(DebugCommand::ExecuteSqlInDebugSession)
+            }
+        },
+        Message::DebugEngineFinished(result) => {
+            app.busy = false;
+            match result {
+                Ok(event) => {
+                    app.debug_session.active = event.active;
+                    app.debug_session.system = event.system;
+                    app.debug_session.status = event.status.clone();
+                    app.debug_session.current_line = event.current_line;
+                    app.metrics = event.status;
+                    let mut out = event.message;
+                    if !event.log.is_empty() {
+                        out.push('\n');
+                        out.push_str(&event.log.join("\n"));
+                    }
+                    if !event.variables.is_empty() {
+                        out.push_str("\n--- variables ---\n");
+                        out.push_str(&event.variables.join("\n"));
+                    }
+                    app.last_output = out;
+                }
+                Err(err) => {
+                    app.metrics = i18n::t("debug.failed");
+                    app.last_output = err;
+                }
+            }
+            Task::none()
+        }
+    }
+}
+
+fn subscription(_app: &App) -> Subscription<Message> {
+    iced::event::listen_with(|event, _status, _window| {
+        let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
+            return None;
+        };
+        debug_hotkey(key, modifiers)
+    })
+}
+
+fn debug_hotkey(key: Key, modifiers: Modifiers) -> Option<Message> {
+    match key.as_ref() {
+        Key::Named(Named::F9) if modifiers.control() => {
+            Some(Message::Debug(DebugToolbarMessage::Run))
+        }
+        Key::Named(Named::F9) => Some(Message::Debug(DebugToolbarMessage::Start)),
+        Key::Character("n") | Key::Character("N") if modifiers.control() && !modifiers.shift() => {
+            Some(Message::Debug(DebugToolbarMessage::StepInto))
+        }
+        Key::Character("o") | Key::Character("O") if modifiers.control() && !modifiers.shift() => {
+            Some(Message::Debug(DebugToolbarMessage::StepOver))
+        }
+        Key::Character("t") | Key::Character("T") if modifiers.control() && !modifiers.shift() => {
+            Some(Message::Debug(DebugToolbarMessage::StepOut))
+        }
+        _ => None,
     }
 }
 
@@ -1336,19 +1673,30 @@ fn view(app: &App) -> Element<'_, Message> {
     // (System may follow OS changes while the app is open).
     ui_theme::apply(app.theme_mode);
 
+    let work_area: Element<'_, Message> = if app.worksheets.is_empty() {
+        column![worksheet_tabs(app), empty_workspace()]
+            .width(Fill)
+            .height(Fill)
+            .into()
+    } else {
+        column![
+            worksheet_tabs(app),
+            worksheet_connection_bar(app),
+            debug_toolbar(app.debug_system).map(Message::Debug),
+            editor_pane(app),
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
+    };
+
     let shell = column![
         ribbon(app),
         rule::horizontal(1).style(|_| rule_style()),
         row![
             side_browser(app),
             vertical_resize_handle(),
-            column![
-                worksheet_tabs(app),
-                worksheet_connection_bar(app),
-                editor_pane(app),
-            ]
-                .width(Fill)
-                .height(Fill),
+            work_area,
         ]
         .height(Fill),
         rule::horizontal(1).style(|_| rule_style()),
@@ -1387,6 +1735,11 @@ fn view(app: &App) -> Element<'_, Message> {
             .into()
     } else if app.connect_error.is_some() {
         stack![base, connect_error_modal(app)]
+            .width(Fill)
+            .height(Fill)
+            .into()
+    } else if app.close_confirm.is_some() {
+        stack![base, close_tab_confirm_modal(app)]
             .width(Fill)
             .height(Fill)
             .into()
@@ -2217,7 +2570,7 @@ fn worksheet_tabs(app: &App) -> Element<'_, Message> {
 
     for (index, sheet) in app.worksheets.iter().enumerate() {
         let active = index == app.active_tab;
-        let title = sheet.kind.tab_title();
+        let title = sheet.tab_label();
         let tab = button(text(title).size(12))
             .padding(Padding::from([7, 12]))
             .style(move |_, status| tab_button_style(active, status))
@@ -2243,6 +2596,97 @@ fn worksheet_tabs(app: &App) -> Element<'_, Message> {
     .width(Fill)
     .style(|_| chrome_style())
     .into()
+}
+
+/// Full work-area placeholder when no worksheets are open.
+fn empty_workspace() -> Element<'static, Message> {
+    let icon = database()
+        .size(128.0)
+        .color(ui_theme::current().accent);
+
+    container(icon)
+        .width(Fill)
+        .height(Fill)
+        .center_x(Fill)
+        .center_y(Fill)
+        .style(|_| container::Style {
+            background: Some(Background::Color(ui_theme::current().panel_bg)),
+            text_color: Some(ui_theme::current().accent),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// Ask Save / Don't save / Cancel before closing a dirty or never-saved tab.
+fn close_tab_confirm_modal(app: &App) -> Element<'_, Message> {
+    let index = app.close_confirm.expect("confirm open");
+    let label = app
+        .worksheets
+        .get(index)
+        .map(|sheet| sheet.tab_label().replace(" *", ""))
+        .unwrap_or_else(|| i18n::t("window.sql"));
+
+    let form = column![
+        text(i18n::t("dialog.close_tab.title")).size(18),
+        text(i18n::t_args(
+            "dialog.close_tab.message",
+            &[("name", label.as_str())],
+        ))
+        .size(13)
+        .color(ui_theme::current().text),
+        row![
+            button(text(i18n::t("dialog.close_tab.save")).size(13))
+                .padding(Padding::from([8, 16]))
+                .style(|_, status| primary_button_style(status))
+                .on_press(Message::CloseTabSave),
+            button(text(i18n::t("dialog.close_tab.discard")).size(13))
+                .padding(Padding::from([8, 16]))
+                .on_press(Message::CloseTabDiscard),
+            Space::new().width(Fill),
+            button(text(i18n::t("dialog.close_tab.cancel")).size(13))
+                .padding(Padding::from([8, 16]))
+                .on_press(Message::CloseTabCancel),
+        ]
+        .spacing(8),
+    ]
+    .spacing(12)
+    .padding(20)
+    .width(440);
+
+    let card = container(form).style(|_| container::Style {
+        background: Some(Background::Color(ui_theme::current().ribbon_bg)),
+        border: Border {
+            color: ui_theme::current().border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        text_color: Some(ui_theme::current().text),
+        ..container::Style::default()
+    });
+
+    let backdrop = mouse_area(
+        container(Space::new().width(Fill).height(Fill))
+            .width(Fill)
+            .height(Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
+                ..container::Style::default()
+            }),
+    )
+    .on_press(Message::CloseTabCancel);
+
+    opaque(
+        stack![
+            backdrop,
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .center_x(Fill)
+                .center_y(Fill),
+        ]
+        .width(Fill)
+        .height(Fill),
+    )
 }
 
 /// Shows which connection the active worksheet was created for.
@@ -2278,18 +2722,16 @@ fn worksheet_connection_bar(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Builds the virtualized line-number gutter for the SQL editor.
+/// Builds the virtualized breakpoint + line-number gutter for the SQL editor.
 ///
 /// Only a window of numbers around the current scroll position is created, so
-/// large documents stay responsive.
-///
-/// # Examples
-///
-/// ```ignore
-/// // Shown as the left column next to `text_editor` in `editor_pane`.
-/// let gutter = line_number_gutter(42, 0.0);
-/// ```
-fn line_number_gutter(line_count: usize, scroll_y: f32) -> Element<'static, Message> {
+/// large documents stay responsive. Click the left margin to toggle a breakpoint.
+fn line_number_gutter(
+    line_count: usize,
+    scroll_y: f32,
+    breakpoints: &HashSet<usize>,
+    current_line: Option<usize>,
+) -> Element<'static, Message> {
     let line_count = line_count.max(1);
     let max_first = line_count.saturating_sub(1);
     let first = ((scroll_y / EDITOR_LINE_HEIGHT).floor() as usize).min(max_first);
@@ -2297,27 +2739,51 @@ fn line_number_gutter(line_count: usize, scroll_y: f32) -> Element<'static, Mess
     let pixel_offset = scroll_y - first as f32 * EDITOR_LINE_HEIGHT;
 
     let digits = ((line_count as f32).log10().floor() as usize) + 1;
-    let gutter_width = (digits as f32 * 9.0 + 20.0).clamp(36.0, 64.0);
+    let gutter_width = (digits as f32 * 9.0 + 36.0).clamp(52.0, 80.0);
 
     let mut numbers = column![].spacing(0);
     for number in (first + 1)..=last {
+        let has_bp = breakpoints.contains(&number);
+        let is_current = current_line == Some(number);
+        let marker = if is_current {
+            "▶"
+        } else if has_bp {
+            "●"
+        } else {
+            " "
+        };
+        let marker_color = if is_current {
+            Color::from_rgb(0.95, 0.75, 0.15)
+        } else if has_bp {
+            Color::from_rgb(0.85, 0.2, 0.2)
+        } else {
+            ui_theme::current().muted
+        };
         numbers = numbers.push(
-            container(
-                text(format!("{number}"))
-                    .size(EDITOR_TEXT_SIZE)
-                    .font(Font::MONOSPACE)
-                    .color(ui_theme::current().muted),
+            button(
+                row![
+                    text(marker)
+                        .size(EDITOR_TEXT_SIZE)
+                        .color(marker_color)
+                        .width(16),
+                    text(format!("{number}"))
+                        .size(EDITOR_TEXT_SIZE)
+                        .font(Font::MONOSPACE)
+                        .color(ui_theme::current().muted),
+                ]
+                .spacing(2)
+                .align_y(Vertical::Center),
             )
-            .width(Fill)
-            .height(EDITOR_LINE_HEIGHT)
-            .align_x(Horizontal::Right)
-            .align_y(Vertical::Center)
             .padding(Padding {
                 top: 0.0,
-                right: 8.0,
+                right: 6.0,
                 bottom: 0.0,
                 left: 4.0,
-            }),
+            })
+            .width(Fill)
+            .height(EDITOR_LINE_HEIGHT)
+            .style(move |_, status| gutter_line_style(is_current, status))
+            .on_press(Message::ToggleBreakpoint(number)),
         );
     }
 
@@ -2345,11 +2811,32 @@ fn line_number_gutter(line_count: usize, scroll_y: f32) -> Element<'static, Mess
     .into()
 }
 
+fn gutter_line_style(
+    is_current: bool,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let background = if is_current {
+        Some(Background::Color(Color::from_rgba(0.95, 0.75, 0.15, 0.25)))
+    } else if matches!(
+        status,
+        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+    ) {
+        Some(Background::Color(ui_theme::current().hover))
+    } else {
+        None
+    };
+    iced::widget::button::Style {
+        background,
+        text_color: ui_theme::current().muted,
+        border: Border::default(),
+        ..iced::widget::button::Style::default()
+    }
+}
+
 fn editor_pane(app: &App) -> Element<'_, Message> {
-    let sheet = app
-        .worksheets
-        .get(app.active_tab)
-        .expect("at least one worksheet");
+    let Some(sheet) = app.worksheets.get(app.active_tab) else {
+        return empty_workspace();
+    };
     let syntax = sheet.kind.syntax();
     let line_count = sheet.content.line_count().max(1);
     let scroll_y = sheet.scroll_y;
@@ -2393,8 +2880,10 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
         })
         .on_action(Message::EditorAction);
 
+    let breakpoints = &sheet.breakpoints;
+    let current_line = app.debug_session.current_line;
     let editor_body = row![
-        line_number_gutter(line_count, scroll_y),
+        line_number_gutter(line_count, scroll_y, breakpoints, current_line),
         container(editor)
             .width(Fill)
             .height(Fill)
@@ -2873,4 +3362,15 @@ fn editor_style(status: iced::widget::text_editor::Status) -> iced::widget::text
         value: ui_theme::current().text,
         selection: ui_theme::current().accent,
     }
+}
+
+fn file_extension(kind: WindowKind) -> &'static str {
+    match kind {
+        WindowKind::JavaSource => "java",
+        _ => "sql",
+    }
+}
+
+fn default_file_name(kind: WindowKind) -> String {
+    format!("untitled.{}", file_extension(kind))
 }
