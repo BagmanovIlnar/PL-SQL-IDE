@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=PLSQL IDE
+Comment=Cross-platform IDE for Oracle PL/SQL and PostgreSQL
+Exec=plsqlide
+Icon=plsqlide
+Terminal=false
+Categories=Development;Database;IDE;
+Keywords=SQL;PL/SQL;Oracle;PostgreSQL;
+StartupNotify=true

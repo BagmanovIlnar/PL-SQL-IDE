@@ -4,12 +4,44 @@ version = "0.1.0"
 description = "Cross-platform IDE for Oracle PL/SQL and PostgreSQL"
 edition = "2021"
 rust-version = "1.88"
-authors = ["plsqlide"]
+authors = ["BagmanovIlnar"]
+license = "MIT"
+homepage = "https://github.com/BagmanovIlnar/PL-SQL-IDE"
+repository = "https://github.com/BagmanovIlnar/PL-SQL-IDE"
+readme = "README.md"
+keywords = ["oracle", "plsql", "postgresql", "ide", "sql"]
+categories = ["development-tools"]
 
 [features]
 default = ["postgres"]
 postgres = []
 oracle = ["dep:oracle"]
+
+[package.metadata.deb]
+maintainer = "BagmanovIlnar"
+copyright = "2026, BagmanovIlnar"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Cross-platform desktop IDE for Oracle PL/SQL and PostgreSQL.
+Includes SQL editor, connection browser, and worksheet tools.
+"""
+depends = "$auto"
+section = "devel"
+priority = "optional"
+assets = [
+    ["target/release/plsqlide", "usr/bin/", "755"],
+    ["packaging/linux/plsqlide.desktop", "usr/share/applications/", "644"],
+    ["README.md", "usr/share/doc/plsqlide/", "644"],
+    ["LICENSE", "usr/share/doc/plsqlide/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/plsqlide", dest = "/usr/bin/plsqlide", mode = "755" },
+    { source = "packaging/linux/plsqlide.desktop", dest = "/usr/share/applications/plsqlide.desktop", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/plsqlide/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/plsqlide/LICENSE", mode = "644", doc = true },
+]
 
 [dependencies]
 iced = { version = "0.14", features = ["highlighter", "tokio", "debug"] }

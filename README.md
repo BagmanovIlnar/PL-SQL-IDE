@@ -22,6 +22,23 @@ Phase 0 validates the technology gate:
 - Oracle spike behind `--features oracle`
 - CI matrix for Linux, Windows and macOS
 
+## Release packages
+
+GitHub Actions workflow [`.github/workflows/release.yml`](./.github/workflows/release.yml) builds installable artifacts:
+
+| Platform | Artifacts |
+| --- | --- |
+| Windows x86_64 | `.exe`, `.zip` |
+| Linux x86_64 | `.tar.gz`, `.deb`, `.rpm` |
+| macOS Apple Silicon (M) | `.zip` (`.app`), `.dmg` |
+
+Triggers:
+
+- push a version tag: `git tag v0.1.0 && git push origin v0.1.0` (also creates a GitHub Release)
+- **Actions → Release packages → Run workflow** (artifacts only)
+
+Oracle Instant Client is **not** linked in CI builds (`--features postgres` only).
+
 ## Prerequisites
 
 - Rust 1.88+
