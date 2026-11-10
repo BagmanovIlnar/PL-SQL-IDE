@@ -247,7 +247,9 @@ where
     let choices: Vec<T> = options.into_iter().collect();
     column![
         row![
-            text(label).size(LABEL_SIZE).color(ui_theme::current().muted),
+            text(label)
+                .size(LABEL_SIZE)
+                .color(ui_theme::current().muted),
             Space::new().width(6),
             help_icon(tip),
         ]

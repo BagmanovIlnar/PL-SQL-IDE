@@ -2,8 +2,8 @@
 
 pub mod app;
 pub mod completion;
-pub mod i18n;
 pub mod debug_toolbar;
+pub mod i18n;
 pub mod oracle_compiler;
 pub mod oracle_debugger;
 pub mod oracle_options;

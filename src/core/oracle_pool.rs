@@ -66,7 +66,7 @@ fn connect_profile(profile: &ConnectionProfile) -> CoreResult<Connection> {
     let mut connector = Connector::new(
         &profile.username,
         &profile.password,
-        &profile.oracle_connect_descriptor(),
+        profile.oracle_connect_descriptor(),
     );
     connector.stmt_cache_size(0);
     connector
@@ -87,15 +87,12 @@ pub mod debug_access {
         let mut guard = POOL
             .lock()
             .map_err(|_| CoreError::Other("oracle pool lock".into()))?;
-        if !guard.contains_key(&profile.id) {
+        if let std::collections::hash_map::Entry::Vacant(e) = guard.entry(profile.id) {
             let target = connect_profile(profile)?;
-            guard.insert(
-                profile.id,
-                PoolEntry {
-                    target,
-                    debug_ctrl: None,
-                },
-            );
+            e.insert(PoolEntry {
+                target,
+                debug_ctrl: None,
+            });
         }
         let entry = guard
             .get_mut(&profile.id)

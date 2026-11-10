@@ -49,7 +49,11 @@ pub fn debug_toolbar(selected_system: DebugSystem) -> Element<'static, DebugTool
 
     let bar = row![
         start_split_button(start_tip, selected_system),
-        tool_icon(play().size(ICON_SIZE), i18n::t("debug.run"), DebugToolbarMessage::Run),
+        tool_icon(
+            play().size(ICON_SIZE),
+            i18n::t("debug.run"),
+            DebugToolbarMessage::Run
+        ),
         tool_icon(
             skip_forward().size(ICON_SIZE),
             i18n::t("debug.step_into"),

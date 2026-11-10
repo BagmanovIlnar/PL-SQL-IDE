@@ -421,8 +421,14 @@ pub fn oracle_connection_page(form: &OracleConnectionForm) -> Element<'_, Oracle
     let env_header = row![
         text(i18n::t("prefs.oracle.env_vars")).size(FIELD_TEXT),
         Space::new().width(Fill),
-        env_tool_button(i18n::t("prefs.oracle.env_add"), OracleConnectionMessage::EnvAdd),
-        env_tool_button(i18n::t("prefs.oracle.env_edit"), OracleConnectionMessage::EnvEdit),
+        env_tool_button(
+            i18n::t("prefs.oracle.env_add"),
+            OracleConnectionMessage::EnvAdd
+        ),
+        env_tool_button(
+            i18n::t("prefs.oracle.env_edit"),
+            OracleConnectionMessage::EnvEdit
+        ),
         env_tool_button(
             i18n::t("prefs.oracle.env_delete"),
             OracleConnectionMessage::EnvDelete,
@@ -566,26 +572,29 @@ fn env_header_cell(
     label: String,
     width: impl Into<Length>,
 ) -> Element<'static, OracleConnectionMessage> {
-    container(text(label).size(LABEL_SIZE).color(ui_theme::current().muted))
-        .width(width)
-        .padding(Padding::from([2, 4]))
-        .style(|_| container::Style {
-            background: Some(Background::Color(ui_theme::current().sidebar_title_bg)),
-            ..container::Style::default()
-        })
-        .into()
+    container(
+        text(label)
+            .size(LABEL_SIZE)
+            .color(ui_theme::current().muted),
+    )
+    .width(width)
+    .padding(Padding::from([2, 4]))
+    .style(|_| container::Style {
+        background: Some(Background::Color(ui_theme::current().sidebar_title_bg)),
+        ..container::Style::default()
+    })
+    .into()
 }
 
 fn env_row_style(
     selected: bool,
     status: iced::widget::button::Status,
 ) -> iced::widget::button::Style {
-    let background = if selected {
-        Some(Background::Color(ui_theme::current().hover))
-    } else if matches!(
-        status,
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
-    ) {
+    let background = if selected
+        || matches!(
+            status,
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+        ) {
         Some(Background::Color(ui_theme::current().hover))
     } else {
         Some(Background::Color(ui_theme::current().panel_bg))

@@ -116,7 +116,9 @@ impl DebugSession {
                         );
                     }
                     DebugSystem::DbmsDebugJdwp => {
-                        let host = if prefs.default_jdwp_network_adapter.eq_ignore_ascii_case("All")
+                        let host = if prefs
+                            .default_jdwp_network_adapter
+                            .eq_ignore_ascii_case("All")
                         {
                             "0.0.0.0"
                         } else {
@@ -155,7 +157,11 @@ impl DebugSession {
             }
             DebugCommand::Run => {
                 if !self.active {
-                    return self.handle(DebugCommand::Start(prefs.default_debug_system), prefs, connection_key);
+                    return self.handle(
+                        DebugCommand::Start(prefs.default_debug_system),
+                        prefs,
+                        connection_key,
+                    );
                 }
                 self.status = "Run / continue".into();
                 DebugCommandResult {

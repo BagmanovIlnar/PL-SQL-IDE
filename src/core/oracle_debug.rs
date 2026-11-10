@@ -124,19 +124,17 @@ fn run_debug_command_oracle(request: DebugEngineRequest) -> CoreResult<DebugEngi
             jdwp_command(&request)
         }
         DebugCommand::Run => continue_probe(&request, 0, "Run / continue"),
-        DebugCommand::StepInto => {
-            continue_probe(&request, breakflags::BREAK_ANY_CALL, "Step Into")
-        }
+        DebugCommand::StepInto => continue_probe(&request, breakflags::BREAK_ANY_CALL, "Step Into"),
         DebugCommand::StepOver => {
             continue_probe(&request, breakflags::BREAK_NEXT_LINE, "Step Over")
         }
-        DebugCommand::StepOut => {
-            continue_probe(&request, breakflags::BREAK_ANY_RETURN, "Step Out")
-        }
+        DebugCommand::StepOut => continue_probe(&request, breakflags::BREAK_ANY_RETURN, "Step Out"),
         DebugCommand::RunToCursor => run_to_cursor_probe(&request),
-        DebugCommand::RunToNextException => {
-            continue_probe(&request, breakflags::BREAK_EXCEPTION, "Run to next exception")
-        }
+        DebugCommand::RunToNextException => continue_probe(
+            &request,
+            breakflags::BREAK_EXCEPTION,
+            "Run to next exception",
+        ),
         DebugCommand::ExecuteSqlInDebugSession => execute_sql_in_target(&request),
     }
 }
@@ -170,7 +168,7 @@ fn start_jdwp_session(request: &DebugEngineRequest) -> CoreResult<DebugEngineEve
     });
 
     let mut session = JdwpSession::accept(listener, Duration::from_secs(60))?;
-    log.extend(session.log.drain(..));
+    log.append(&mut session.log);
 
     match join.join() {
         Ok(Ok(())) => log.push(format!("CONNECT_TCP to {oracle_host}:{port} ok")),
@@ -183,7 +181,7 @@ fn start_jdwp_session(request: &DebugEngineRequest) -> CoreResult<DebugEngineEve
     }
 
     session.set_breakpoints(&request.breakpoints)?;
-    log.extend(session.log.drain(..));
+    log.append(&mut session.log);
 
     if let Err(err) = session.request_exception_break() {
         log.push(format!("exception break: {err}"));
@@ -236,7 +234,7 @@ fn stop_jdwp_session(request: &DebugEngineRequest) -> CoreResult<DebugEngineEven
     if let Ok(mut guard) = JDWP_SESSIONS.lock() {
         if let Some(mut session) = guard.remove(&id) {
             let _ = session.dispose();
-            log.extend(session.log.drain(..));
+            log.append(&mut session.log);
             log.push("JDWP session disposed".into());
         }
     }
@@ -289,16 +287,13 @@ fn jdwp_command(request: &DebugEngineRequest) -> CoreResult<DebugEngineEvent> {
         if let Ok(mut guard) = JDWP_SESSIONS.lock() {
             if let Some(session) = guard.get_mut(&id) {
                 let _ = session.set_breakpoints(&[Breakpoint { line }]);
-                log.extend(session.log.drain(..));
+                log.append(&mut session.log);
             }
         }
     }
 
     // Step / exception request before resume.
-    let thread = LAST_THREAD
-        .lock()
-        .ok()
-        .and_then(|g| g.get(&id).copied());
+    let thread = LAST_THREAD.lock().ok().and_then(|g| g.get(&id).copied());
     if let Ok(mut guard) = JDWP_SESSIONS.lock() {
         if let Some(session) = guard.get_mut(&id) {
             match request.command {
@@ -316,18 +311,17 @@ fn jdwp_command(request: &DebugEngineRequest) -> CoreResult<DebugEngineEvent> {
                 }
                 _ => {}
             }
-            log.extend(session.log.drain(..));
+            log.append(&mut session.log);
             session.resume_vm()?;
-            log.extend(session.log.drain(..));
+            log.append(&mut session.log);
         } else {
-            return Err(CoreError::Other("JDWP session missing — Start debugger first".into()));
+            return Err(CoreError::Other(
+                "JDWP session missing — Start debugger first".into(),
+            ));
         }
     }
 
-    let maybe_source = SESSION_SOURCE
-        .lock()
-        .ok()
-        .and_then(|mut g| g.remove(&id));
+    let maybe_source = SESSION_SOURCE.lock().ok().and_then(|mut g| g.remove(&id));
 
     let pause = if let Some(source) = maybe_source {
         // Run PL/SQL on target while waiting for JDWP pause event.
@@ -539,13 +533,10 @@ fn continue_probe(
     ensure_active(id)?;
     let mut log = vec![format!("{label} (breakflags={flags})")];
 
-    let maybe_source = SESSION_SOURCE
-        .lock()
-        .ok()
-        .and_then(|mut g| g.remove(&id));
+    let maybe_source = SESSION_SOURCE.lock().ok().and_then(|mut g| g.remove(&id));
 
     let pause = if let Some(source) = maybe_source {
-        let (target_res, pause) = debug_access::with_pair_parallel(
+        let (_target_res, pause) = debug_access::with_pair_parallel(
             id,
             move |target| {
                 target
@@ -555,7 +546,6 @@ fn continue_probe(
             },
             move |ctrl| probe_continue_on(ctrl, flags),
         )?;
-        let _ = target_res;
         pause
     } else {
         debug_access::with_ctrl_mut(id, |ctrl| probe_continue_on(ctrl, flags))?
@@ -585,8 +575,7 @@ fn run_to_cursor_probe(request: &DebugEngineRequest) -> CoreResult<DebugEngineEv
             Ok(event)
         }
         Err(err) => {
-            let mut event =
-                continue_probe(request, breakflags::BREAK_NEXT_LINE, "Run to cursor")?;
+            let mut event = continue_probe(request, breakflags::BREAK_NEXT_LINE, "Run to cursor")?;
             event.log.push(format!("cursor bp failed: {err}"));
             Ok(event)
         }
@@ -803,9 +792,7 @@ fn ensure_active(id: ConnectionId) -> CoreResult<()> {
         .map(|s| s.active)
         .unwrap_or(false);
     if !active {
-        return Err(CoreError::Other(
-            "Start the debugger first (F9)".into(),
-        ));
+        return Err(CoreError::Other("Start the debugger first (F9)".into()));
     }
     Ok(())
 }

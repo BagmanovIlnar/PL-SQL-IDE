@@ -164,7 +164,11 @@ impl OracleDebuggerPrefs {
     }
 
     /// SQL fragment for compile: empty or ` DEBUG` (as in `ALTER … COMPILE DEBUG`).
-    pub fn compile_debug_clause(&self, connection_key: &str, object_name: Option<&str>) -> &'static str {
+    pub fn compile_debug_clause(
+        &self,
+        connection_key: &str,
+        object_name: Option<&str>,
+    ) -> &'static str {
         if self.should_add_debug_info(connection_key, object_name) {
             " DEBUG"
         } else {

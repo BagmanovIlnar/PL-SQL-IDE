@@ -1,3 +1,5 @@
+#![allow(dead_code)] // ponytail: JDWP protocol spec tables, filled in as debugger commands land
+
 //! Low-level JDWP packet codec (big-endian).
 
 use std::io::{Read, Write};
@@ -172,7 +174,14 @@ impl PacketWriter {
     }
 
     /// Location: tag(1) + classID + methodID + index(8)
-    pub fn write_location(&mut self, sizes: &IdSizes, tag: u8, class: u64, method: u64, index: u64) {
+    pub fn write_location(
+        &mut self,
+        sizes: &IdSizes,
+        tag: u8,
+        class: u64,
+        method: u64,
+        index: u64,
+    ) {
         self.write_byte(tag);
         self.write_id(sizes.reference_type_id, class);
         self.write_id(sizes.method_id, method);
@@ -297,7 +306,9 @@ pub fn read_packet(stream: &mut impl Read) -> CoreResult<Packet> {
         .map_err(|err| CoreError::Other(format!("JDWP read length: {err}")))?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len < 11 {
-        return Err(CoreError::Other(format!("JDWP: invalid packet length {len}")));
+        return Err(CoreError::Other(format!(
+            "JDWP: invalid packet length {len}"
+        )));
     }
     let mut rest = vec![0u8; len - 4];
     stream
@@ -338,7 +349,7 @@ pub fn handshake(stream: &mut (impl Read + Write)) -> CoreResult<()> {
     stream
         .read_exact(&mut buf)
         .map_err(|err| CoreError::Other(format!("JDWP handshake read: {err}")))?;
-    if &buf != HANDSHAKE {
+    if buf != HANDSHAKE {
         return Err(CoreError::Other(format!(
             "JDWP handshake mismatch: {:?}",
             String::from_utf8_lossy(&buf)

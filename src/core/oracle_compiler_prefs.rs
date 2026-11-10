@@ -307,4 +307,3 @@ pub fn apply_to_connection(connection: &oracle::Connection) -> super::CoreResult
     }
     Ok(())
 }
-

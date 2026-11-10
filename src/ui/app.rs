@@ -15,7 +15,9 @@ use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, row, rule, scrollable,
     stack, text, text_editor, text_input, tooltip, Space,
 };
-use iced::{Background, Color, Element, Event, Fill, Font, Padding, Point, Subscription, Task, Theme};
+use iced::{
+    Background, Color, Element, Event, Fill, Font, Padding, Point, Subscription, Task, Theme,
+};
 use iced_fonts::lucide::{database, pencil, plug, plus, trash};
 use iced_fonts::LUCIDE_FONT_BYTES;
 
@@ -49,16 +51,17 @@ const SIDEBAR_WIDTH_MAX: f32 = 640.0;
 use iced_aw::menu::{DrawPath, Item, Menu, MenuBar};
 use iced_aw::style::menu_bar as menu_bar_style;
 
+use crate::core::connections_store::{self, ConnectionsStore};
 use crate::core::debug_session::{Breakpoint, DebugCommand, DebugSession};
 use crate::core::object_metadata::{list_objects, list_owners, ObjectKind, ObjectOwnerList};
 use crate::core::oracle_debug::{self, DebugEngineEvent, DebugEngineRequest};
 use crate::core::oracle_debugger_prefs::{self, DebugSystem};
 use crate::core::oracle_pool;
 use crate::core::postgres_spike::{run_postgres_spike, PostgresSpikeRequest};
-use crate::core::connections_store::{self, ConnectionsStore};
 use crate::core::{ConnectionId, ConnectionProfile, DbKind};
 use crate::ui::completion::{suggest_keywords, word_prefix_at};
 use crate::ui::debug_toolbar::{debug_toolbar, DebugToolbarMessage};
+use crate::ui::i18n;
 use crate::ui::parameters::{
     parameters_view, value_editor_modal, ParamMessage, ParametersPanel, ValueEditorDraft,
     PANEL_HEIGHT, PANEL_HEIGHT_MAX, PANEL_HEIGHT_MIN,
@@ -66,7 +69,6 @@ use crate::ui::parameters::{
 use crate::ui::preferences::{preferences_modal, PreferencesMessage, PreferencesState};
 use crate::ui::theme::{self as ui_theme, ThemeMode};
 use crate::ui::window_kind::WindowKind;
-use crate::ui::i18n;
 
 /// Runs the iced IDE window.
 pub fn run() -> iced::Result {
@@ -90,8 +92,15 @@ pub fn run() -> iced::Result {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BrowserNode {
     Schema(String),
-    Folder { schema: String, kind: ObjectKind },
-    Object { schema: String, kind: ObjectKind, name: String },
+    Folder {
+        schema: String,
+        kind: ObjectKind,
+    },
+    Object {
+        schema: String,
+        kind: ObjectKind,
+        name: String,
+    },
 }
 
 /// Which panel border is being dragged to resize.
@@ -686,10 +695,7 @@ impl App {
 
         let prefs = oracle_debugger_prefs::load();
         let key = self.connection_key();
-        let source = self
-            .active_content()
-            .map(|c| c.text())
-            .unwrap_or_default();
+        let source = self.active_content().map(|c| c.text()).unwrap_or_default();
         let request = DebugEngineRequest {
             profile,
             command,
@@ -1130,8 +1136,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.selected_connection = Some(id);
             app.persist_connections();
             if let Some(profile) = app.selected_profile() {
-                app.metrics =
-                    i18n::t_args("status.selected_connection", &[("name", profile.name.as_str())]);
+                app.metrics = i18n::t_args(
+                    "status.selected_connection",
+                    &[("name", profile.name.as_str())],
+                );
             }
             if app.selected_is_connected() {
                 start_load_object_roots(app)
@@ -1185,9 +1193,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.busy = false;
             match result {
                 Ok(()) => {
-                    app.connection_status.insert(id, ConnectionStatus::Connected);
+                    app.connection_status
+                        .insert(id, ConnectionStatus::Connected);
                     app.connect_error = None;
-                    if let Some(profile) = app.connections.iter().find(|item| item.id == id).cloned()
+                    if let Some(profile) =
+                        app.connections.iter().find(|item| item.id == id).cloned()
                     {
                         if profile.db_kind == DbKind::Oracle {
                             if let Err(err) = oracle_pool::open_target(&profile) {
@@ -1357,10 +1367,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ResizeStart(target) => {
-            app.resize_drag = Some(ResizeDrag {
-                target,
-                last: None,
-            });
+            app.resize_drag = Some(ResizeDrag { target, last: None });
             Task::none()
         }
         Message::ResizeMove(point) => {
@@ -1371,13 +1378,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                             // Dragging the shared border down shrinks parameters
                             // (editor grows); dragging up grows parameters.
                             let next = app.parameters_height - (point.y - last.y);
-                            app.parameters_height =
-                                next.clamp(PANEL_HEIGHT_MIN, PANEL_HEIGHT_MAX);
+                            app.parameters_height = next.clamp(PANEL_HEIGHT_MIN, PANEL_HEIGHT_MAX);
                         }
                         ResizeTarget::Sidebar => {
                             let next = app.sidebar_width + (point.x - last.x);
-                            app.sidebar_width =
-                                next.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+                            app.sidebar_width = next.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
                         }
                     }
                 }
@@ -1409,9 +1414,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             DebugToolbarMessage::StepInto => app.apply_debug_command(DebugCommand::StepInto),
             DebugToolbarMessage::StepOver => app.apply_debug_command(DebugCommand::StepOver),
             DebugToolbarMessage::StepOut => app.apply_debug_command(DebugCommand::StepOut),
-            DebugToolbarMessage::RunToCursor => {
-                app.apply_debug_command(DebugCommand::RunToCursor)
-            }
+            DebugToolbarMessage::RunToCursor => app.apply_debug_command(DebugCommand::RunToCursor),
             DebugToolbarMessage::RunToNextException => {
                 app.apply_debug_command(DebugCommand::RunToNextException)
             }
@@ -1703,12 +1706,7 @@ fn view(app: &App) -> Element<'_, Message> {
     let shell = column![
         ribbon(app),
         rule::horizontal(1).style(|_| rule_style()),
-        row![
-            side_browser(app),
-            vertical_resize_handle(),
-            work_area,
-        ]
-        .height(Fill),
+        row![side_browser(app), vertical_resize_handle(), work_area,].height(Fill),
         rule::horizontal(1).style(|_| rule_style()),
         status_bar(app),
     ]
@@ -1800,14 +1798,10 @@ fn ribbon_dropdown(
         .close_on_background_click_global(true)
         .style(|_, _| ribbon_dropdown_style());
 
-    mouse_area(
-        container(bar)
-            .height(28)
-            .align_y(Vertical::Center),
-    )
-    .on_enter(Message::RibbonHover(Some(target)))
-    .on_exit(Message::RibbonHover(None))
-    .into()
+    mouse_area(container(bar).height(28).align_y(Vertical::Center))
+        .on_enter(Message::RibbonHover(Some(target)))
+        .on_exit(Message::RibbonHover(None))
+        .into()
 }
 
 fn ribbon_divider() -> Element<'static, Message> {
@@ -1823,9 +1817,7 @@ fn ribbon_group<'a>(
     let label = label.into();
     container(
         column![
-            container(content)
-                .height(28)
-                .align_y(Vertical::Center),
+            container(content).height(28).align_y(Vertical::Center),
             text(label).size(10).color(ui_theme::current().muted),
         ]
         .spacing(1)
@@ -1965,9 +1957,8 @@ fn ribbon(app: &App) -> Element<'_, Message> {
 
     let open_menu = Menu::new(vec![
         Item::new(
-            ribbon_menu_item(i18n::t("menu.program_file")).on_press(Message::MenuOpenStub(i18n::t(
-                "menu.program_file",
-            ))),
+            ribbon_menu_item(i18n::t("menu.program_file"))
+                .on_press(Message::MenuOpenStub(i18n::t("menu.program_file"))),
         ),
         Item::new(
             ribbon_menu_item(i18n::t("menu.test_script"))
@@ -2026,7 +2017,9 @@ fn ribbon(app: &App) -> Element<'_, Message> {
                 ribbon_divider(),
                 ribbon_group(
                     i18n::t("ribbon.group.application"),
-                    ribbon_command(i18n::t("ribbon.exit")).on_press(Message::MenuExit).into(),
+                    ribbon_command(i18n::t("ribbon.exit"))
+                        .on_press(Message::MenuExit)
+                        .into(),
                 ),
                 Space::new().width(Fill),
             ]
@@ -2096,11 +2089,7 @@ fn side_browser(app: &App) -> Element<'_, Message> {
     for profile in &app.connections {
         let selected = app.selected_connection == Some(profile.id);
         let id = profile.id;
-        let status = app
-            .connection_status
-            .get(&id)
-            .copied()
-            .unwrap_or_default();
+        let status = app.connection_status.get(&id).copied().unwrap_or_default();
         let label = profile.summary();
         let mut label_text = text(label).size(12).font(Font::MONOSPACE);
         label_text = match status {
@@ -2109,15 +2098,11 @@ fn side_browser(app: &App) -> Element<'_, Message> {
             ConnectionStatus::Unknown => label_text,
         };
         list = list.push(
-            button(
-                container(label_text)
-                    .width(Fill)
-                    .align_x(Horizontal::Left),
-            )
-            .width(Fill)
-            .padding(Padding::from([8, 10]))
-            .style(move |_, btn_status| connection_row_style(selected, status, btn_status))
-            .on_press(Message::SelectConnection(id)),
+            button(container(label_text).width(Fill).align_x(Horizontal::Left))
+                .width(Fill)
+                .padding(Padding::from([8, 10]))
+                .style(move |_, btn_status| connection_row_style(selected, status, btn_status))
+                .on_press(Message::SelectConnection(id)),
         );
     }
 
@@ -2125,10 +2110,26 @@ fn side_browser(app: &App) -> Element<'_, Message> {
         section_title(i18n::t("connections.title")),
         container(
             row![
-                dock_icon_button(plus().size(14), i18n::t("connections.add"), Message::AddConnection),
-                dock_icon_button(pencil().size(14), i18n::t("connections.edit"), Message::EditConnection),
-                dock_icon_button(trash().size(14), i18n::t("connections.delete"), Message::DeleteConnection),
-                dock_icon_button(plug().size(14), i18n::t("connections.connect"), Message::ConnectSelected),
+                dock_icon_button(
+                    plus().size(14),
+                    i18n::t("connections.add"),
+                    Message::AddConnection
+                ),
+                dock_icon_button(
+                    pencil().size(14),
+                    i18n::t("connections.edit"),
+                    Message::EditConnection
+                ),
+                dock_icon_button(
+                    trash().size(14),
+                    i18n::t("connections.delete"),
+                    Message::DeleteConnection
+                ),
+                dock_icon_button(
+                    plug().size(14),
+                    i18n::t("connections.connect"),
+                    Message::ConnectSelected
+                ),
             ]
             .spacing(4)
         )
@@ -2289,15 +2290,27 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
 
     let form = column![
         text(title).size(18),
-        labeled_input(i18n::t("dialog.connection.name"), &draft.name, Message::DialogNameChanged),
+        labeled_input(
+            i18n::t("dialog.connection.name"),
+            &draft.name,
+            Message::DialogNameChanged
+        ),
         text(i18n::t("dialog.connection.db_type"))
             .size(12)
             .color(ui_theme::current().muted),
         pick_list(db_kinds, Some(draft.db_kind), Message::DialogDbKindChanged)
             .padding(8)
             .width(Fill),
-        labeled_input(i18n::t("dialog.connection.host"), &draft.host, Message::DialogHostChanged),
-        labeled_input(i18n::t("dialog.connection.port"), &draft.port, Message::DialogPortChanged),
+        labeled_input(
+            i18n::t("dialog.connection.host"),
+            &draft.host,
+            Message::DialogHostChanged
+        ),
+        labeled_input(
+            i18n::t("dialog.connection.port"),
+            &draft.port,
+            Message::DialogPortChanged
+        ),
         labeled_input(
             database_field_label,
             &draft.database,
@@ -2315,7 +2328,9 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
             true,
         ),
         if let Some(error) = &app.dialog_error {
-            text(error.clone()).size(12).color(Color::from_rgb(1.0, 0.45, 0.45))
+            text(error.clone())
+                .size(12)
+                .color(Color::from_rgb(1.0, 0.45, 0.45))
         } else {
             text("").size(12)
         },
@@ -2380,9 +2395,7 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
         text(i18n::t("dialog.connect_failed.title"))
             .size(18)
             .color(Color::from_rgb(0.90, 0.28, 0.28)),
-        text(error)
-            .size(13)
-            .color(ui_theme::current().text),
+        text(error).size(13).color(ui_theme::current().text),
         row![
             Space::new().width(Fill),
             button(text(i18n::t("dialog.connect_failed.ok")).size(13))
@@ -2450,12 +2463,9 @@ fn labeled_input_secure(
     if secure {
         input = input.secure(true);
     }
-    column![
-        text(label).size(12).color(ui_theme::current().muted),
-        input,
-    ]
-    .spacing(4)
-    .into()
+    column![text(label).size(12).color(ui_theme::current().muted), input,]
+        .spacing(4)
+        .into()
 }
 
 fn section_title(title: impl Into<String>) -> Element<'static, Message> {
@@ -2608,9 +2618,7 @@ fn worksheet_tabs(app: &App) -> Element<'_, Message> {
 
 /// Full work-area placeholder when no worksheets are open.
 fn empty_workspace() -> Element<'static, Message> {
-    let icon = database()
-        .size(128.0)
-        .color(ui_theme::current().accent);
+    let icon = database().size(128.0).color(ui_theme::current().accent);
 
     container(icon)
         .width(Fill)
@@ -2795,14 +2803,12 @@ fn line_number_gutter(
         );
     }
 
-    container(
-        container(numbers).padding(Padding {
-            top: (EDITOR_PADDING - pixel_offset).max(0.0),
-            right: 0.0,
-            bottom: 0.0,
-            left: 0.0,
-        }),
-    )
+    container(container(numbers).padding(Padding {
+        top: (EDITOR_PADDING - pixel_offset).max(0.0),
+        right: 0.0,
+        bottom: 0.0,
+        left: 0.0,
+    }))
     .width(gutter_width)
     .height(Fill)
     .clip(true)
@@ -2962,9 +2968,7 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
             .into()
     };
 
-    let editor_stack = stack![editor_layer, overlay]
-        .width(Fill)
-        .height(Fill);
+    let editor_stack = stack![editor_layer, overlay].width(Fill).height(Fill);
 
     if sheet.kind.shows_parameters() {
         let db_kind = sheet

@@ -64,12 +64,7 @@ impl ObjectKind {
                 Self::Functions,
                 Self::Packages,
             ],
-            DbKind::Postgres => &[
-                Self::Tables,
-                Self::Views,
-                Self::Procedures,
-                Self::Functions,
-            ],
+            DbKind::Postgres => &[Self::Tables, Self::Views, Self::Procedures, Self::Functions],
         }
     }
 }
@@ -321,15 +316,19 @@ async fn list_owners_oracle(
     #[cfg(feature = "oracle")]
     {
         let profile = profile.clone();
-        tokio::task::spawn_blocking(move || list_owners_oracle_blocking(&profile, current_user_only))
-            .await
-            .map_err(|err| CoreError::Other(err.to_string()))?
+        tokio::task::spawn_blocking(move || {
+            list_owners_oracle_blocking(&profile, current_user_only)
+        })
+        .await
+        .map_err(|err| CoreError::Other(err.to_string()))?
     }
 
     #[cfg(not(feature = "oracle"))]
     {
         let _ = (profile, current_user_only);
-        Err(CoreError::UnsupportedDb("oracle (build with --features oracle)"))
+        Err(CoreError::UnsupportedDb(
+            "oracle (build with --features oracle)",
+        ))
     }
 }
 
@@ -350,7 +349,9 @@ async fn list_objects_oracle(
     #[cfg(not(feature = "oracle"))]
     {
         let _ = (profile, owner, kind);
-        Err(CoreError::UnsupportedDb("oracle (build with --features oracle)"))
+        Err(CoreError::UnsupportedDb(
+            "oracle (build with --features oracle)",
+        ))
     }
 }
 
@@ -375,7 +376,7 @@ fn list_owners_oracle_blocking(
     let mut connector = Connector::new(
         &profile.username,
         &profile.password,
-        &profile.oracle_connect_descriptor(),
+        profile.oracle_connect_descriptor(),
     );
     connector.stmt_cache_size(0);
     let connection = connector
@@ -417,7 +418,7 @@ fn list_objects_oracle_blocking(
     let mut connector = Connector::new(
         &profile.username,
         &profile.password,
-        &profile.oracle_connect_descriptor(),
+        profile.oracle_connect_descriptor(),
     );
     connector.stmt_cache_size(0);
     let connection = connector

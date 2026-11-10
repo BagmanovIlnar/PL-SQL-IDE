@@ -71,9 +71,7 @@ impl JdwpSession {
 
     /// Host string Oracle should use in `CONNECT_TCP` (reachable address).
     pub fn connect_host_for_oracle(adapter: &str) -> String {
-        if adapter.eq_ignore_ascii_case("All")
-            || adapter == "0.0.0.0"
-            || adapter.trim().is_empty()
+        if adapter.eq_ignore_ascii_case("All") || adapter == "0.0.0.0" || adapter.trim().is_empty()
         {
             "127.0.0.1".into()
         } else {
@@ -101,12 +99,8 @@ impl JdwpSession {
                 )));
             }
         };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
-            .ok();
-        stream
-            .set_write_timeout(Some(Duration::from_secs(30)))
-            .ok();
+        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
         protocol::handshake(&mut stream)?;
         let mut session = Self {
             stream,
@@ -201,9 +195,7 @@ impl JdwpSession {
                 Ok(req_id) => self
                     .log
                     .push(format!("breakpoint line {} → requestId={req_id}", bp.line)),
-                Err(err) => self
-                    .log
-                    .push(format!("breakpoint line {}: {err}", bp.line)),
+                Err(err) => self.log.push(format!("breakpoint line {}: {err}", bp.line)),
             }
         }
         Ok(())
@@ -308,9 +300,7 @@ impl JdwpSession {
                 let pause = self.parse_composite_event(&packet.data)?;
                 let mut pause = pause;
                 if let (Some(thread), Some(_class)) = (pause.thread_id, pause.class_id) {
-                    pause.variables = self
-                        .read_frame_variables(thread)
-                        .unwrap_or_default();
+                    pause.variables = self.read_frame_variables(thread).unwrap_or_default();
                 }
                 return Ok(pause);
             }

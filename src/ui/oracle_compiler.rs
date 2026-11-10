@@ -461,13 +461,13 @@ pub fn oracle_compiler_editor_modal(
             name_value_editor(draft),
             OracleCompilerMessage::NameValueCancel,
         ))
-    } else if let Some(draft) = &form.warning_editor {
-        Some(compiler_dialog_modal(
-            warning_editor(draft),
-            OracleCompilerMessage::WarningEditorCancel,
-        ))
     } else {
-        None
+        form.warning_editor.as_ref().map(|draft| {
+            compiler_dialog_modal(
+                warning_editor(draft),
+                OracleCompilerMessage::WarningEditorCancel,
+            )
+        })
     }
 }
 
@@ -563,7 +563,9 @@ where
     let choices: Vec<T> = options.into_iter().collect();
     column![
         row![
-            text(label).size(LABEL_SIZE).color(ui_theme::current().muted),
+            text(label)
+                .size(LABEL_SIZE)
+                .color(ui_theme::current().muted),
             Space::new().width(6),
             help_icon(tip),
         ]
@@ -578,6 +580,8 @@ where
     .into()
 }
 
+// ponytail: 8 plain message args is simpler than a params struct for one call site
+#[allow(clippy::too_many_arguments)]
 fn name_value_grid<'a>(
     title: String,
     tip: String,
@@ -638,8 +642,14 @@ fn warning_grid(form: &OracleCompilerForm) -> Element<'_, OracleCompilerMessage>
         Space::new().width(6),
         help_icon(i18n::t("prefs.oracle.compiler.warnings_tip")),
         Space::new().width(Fill),
-        tool_button(i18n::t("prefs.oracle.env_add"), OracleCompilerMessage::WarningAdd),
-        tool_button(i18n::t("prefs.oracle.env_edit"), OracleCompilerMessage::WarningEdit),
+        tool_button(
+            i18n::t("prefs.oracle.env_add"),
+            OracleCompilerMessage::WarningAdd
+        ),
+        tool_button(
+            i18n::t("prefs.oracle.env_edit"),
+            OracleCompilerMessage::WarningEdit
+        ),
         tool_button(
             i18n::t("prefs.oracle.env_delete"),
             OracleCompilerMessage::WarningDelete,
@@ -798,18 +808,19 @@ fn tool_button(
         .into()
 }
 
-fn header_cell(
-    label: String,
-    width: impl Into<Length>,
-) -> Element<'static, OracleCompilerMessage> {
-    container(text(label).size(LABEL_SIZE).color(ui_theme::current().muted))
-        .width(width)
-        .padding(Padding::from([2, 4]))
-        .style(|_| container::Style {
-            background: Some(Background::Color(ui_theme::current().sidebar_title_bg)),
-            ..container::Style::default()
-        })
-        .into()
+fn header_cell(label: String, width: impl Into<Length>) -> Element<'static, OracleCompilerMessage> {
+    container(
+        text(label)
+            .size(LABEL_SIZE)
+            .color(ui_theme::current().muted),
+    )
+    .width(width)
+    .padding(Padding::from([2, 4]))
+    .style(|_| container::Style {
+        background: Some(Background::Color(ui_theme::current().sidebar_title_bg)),
+        ..container::Style::default()
+    })
+    .into()
 }
 
 fn help_icon(tip: String) -> Element<'static, OracleCompilerMessage> {
@@ -823,16 +834,12 @@ fn help_icon(tip: String) -> Element<'static, OracleCompilerMessage> {
     .into()
 }
 
-fn row_style(
-    selected: bool,
-    status: iced::widget::button::Status,
-) -> iced::widget::button::Style {
-    let background = if selected {
-        Some(Background::Color(ui_theme::current().hover))
-    } else if matches!(
-        status,
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
-    ) {
+fn row_style(selected: bool, status: iced::widget::button::Status) -> iced::widget::button::Style {
+    let background = if selected
+        || matches!(
+            status,
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+        ) {
         Some(Background::Color(ui_theme::current().hover))
     } else {
         Some(Background::Color(ui_theme::current().panel_bg))

@@ -134,10 +134,11 @@ pub fn suggest_keywords(prefix: &str, limit: usize) -> Vec<String> {
     let needle = prefix.to_ascii_uppercase();
     let mut out = Vec::new();
     for keyword in SQL_KEYWORDS {
-        if keyword.starts_with(&needle) && *keyword != needle.as_str() {
-            if !out.iter().any(|item| item == *keyword) {
-                out.push((*keyword).to_string());
-            }
+        if keyword.starts_with(&needle)
+            && *keyword != needle.as_str()
+            && !out.iter().any(|item| item == *keyword)
+        {
+            out.push((*keyword).to_string());
         }
         if out.len() >= limit {
             break;

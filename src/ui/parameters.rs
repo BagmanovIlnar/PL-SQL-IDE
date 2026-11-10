@@ -6,11 +6,11 @@
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::border::Border;
+use iced::widget::text_editor::{Action, Content};
 use iced::widget::{
     button, column, container, mouse_area, opaque, pick_list, row, scrollable, stack, text,
     text_editor, text_input, tooltip, Space,
 };
-use iced::widget::text_editor::{Action, Content};
 use iced::{Background, Color, Element, Fill, Font, Length, Padding};
 use iced_fonts::lucide::{plus, trash};
 
@@ -302,11 +302,7 @@ impl ParamDataType {
     /// Types offered in the Type pick list for the worksheet database.
     pub fn for_db(kind: DbKind) -> Vec<Self> {
         match kind {
-            DbKind::Oracle => OracleType::ALL
-                .iter()
-                .copied()
-                .map(Self::Oracle)
-                .collect(),
+            DbKind::Oracle => OracleType::ALL.iter().copied().map(Self::Oracle).collect(),
             DbKind::Postgres => PostgresType::ALL
                 .iter()
                 .copied()
@@ -671,7 +667,7 @@ pub fn hex_to_bytes(input: &str) -> Result<Vec<u8>, String> {
     if cleaned.is_empty() {
         return Ok(Vec::new());
     }
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err("Hex length must be even".into());
     }
     (0..cleaned.len())
@@ -721,7 +717,11 @@ pub fn parameters_view(
     let toolbar = row![
         text(crate::ui::i18n::t("params.title")).size(12),
         Space::new().width(Fill),
-        param_icon_button(plus().size(14), crate::ui::i18n::t("params.add"), ParamMessage::Add),
+        param_icon_button(
+            plus().size(14),
+            crate::ui::i18n::t("params.add"),
+            ParamMessage::Add
+        ),
         param_icon_button(
             trash().size(14),
             crate::ui::i18n::t("params.delete"),
@@ -789,20 +789,16 @@ fn parameter_row(
         .size(12)
         .width(140);
 
-    let mode_pick = pick_list(
-        ParamMode::all(),
-        Some(param.mode),
-        move |mode| ParamMessage::ModeChanged(index, mode),
-    )
+    let mode_pick = pick_list(ParamMode::all(), Some(param.mode), move |mode| {
+        ParamMessage::ModeChanged(index, mode)
+    })
     .padding(4)
     .text_size(12)
     .width(90);
 
-    let type_pick = pick_list(
-        type_options,
-        Some(selected_type),
-        move |data_type| ParamMessage::TypeChanged(index, data_type),
-    )
+    let type_pick = pick_list(type_options, Some(selected_type), move |data_type| {
+        ParamMessage::TypeChanged(index, data_type)
+    })
     .padding(4)
     .text_size(12)
     .width(180);
@@ -842,7 +838,10 @@ fn parameter_row(
     .into()
 }
 
-fn header_cell(label: impl Into<String>, width: impl Into<Length>) -> Element<'static, ParamMessage> {
+fn header_cell(
+    label: impl Into<String>,
+    width: impl Into<Length>,
+) -> Element<'static, ParamMessage> {
     container(text(label.into()).size(11).color(ui_theme::current().muted))
         .width(width)
         .padding(Padding::from([4, 4]))

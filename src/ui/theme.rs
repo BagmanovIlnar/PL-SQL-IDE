@@ -116,8 +116,7 @@ impl Palette {
     }
 }
 
-static ACTIVE: LazyLock<RwLock<Palette>> =
-    LazyLock::new(|| RwLock::new(Palette::light()));
+static ACTIVE: LazyLock<RwLock<Palette>> = LazyLock::new(|| RwLock::new(Palette::light()));
 
 /// Applies the given preference so widget styles can read current colors.
 pub fn apply(mode: ThemeMode) {

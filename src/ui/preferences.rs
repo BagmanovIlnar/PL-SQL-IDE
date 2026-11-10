@@ -16,12 +16,8 @@ use crate::ui::i18n::{self, LocaleInfo};
 use crate::ui::oracle_compiler::{
     oracle_compiler_editor_modal, oracle_compiler_page, OracleCompilerForm, OracleCompilerMessage,
 };
-use crate::ui::oracle_debugger::{
-    oracle_debugger_page, OracleDebuggerForm, OracleDebuggerMessage,
-};
-use crate::ui::oracle_options::{
-    oracle_options_page, OracleOptionsForm, OracleOptionsMessage,
-};
+use crate::ui::oracle_debugger::{oracle_debugger_page, OracleDebuggerForm, OracleDebuggerMessage};
+use crate::ui::oracle_options::{oracle_options_page, OracleOptionsForm, OracleOptionsMessage};
 use crate::ui::oracle_prefs::{
     oracle_connection_page, OracleConnectionForm, OracleConnectionMessage,
 };
@@ -213,7 +209,7 @@ impl PreferencesState {
 
     /// Whether `section` is expanded in the left tree.
     pub fn is_expanded(&self, section: PreferencesSection) -> bool {
-        self.expanded.iter().any(|item| *item == section)
+        self.expanded.contains(&section)
     }
 
     /// Expand or collapse a section row.
@@ -318,9 +314,8 @@ impl PreferencesState {
 fn preferences_page(state: &PreferencesState) -> Element<'_, PreferencesMessage> {
     match state.selected {
         PreferencesPage::UiAppearance => appearance_page(state),
-        PreferencesPage::OracleConnection => {
-            oracle_connection_page(&state.oracle_connection).map(PreferencesMessage::OracleConnection)
-        }
+        PreferencesPage::OracleConnection => oracle_connection_page(&state.oracle_connection)
+            .map(PreferencesMessage::OracleConnection),
         PreferencesPage::OracleOptions => {
             oracle_options_page(&state.oracle_options).map(PreferencesMessage::OracleOptions)
         }
@@ -493,17 +488,13 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
     let mut layers = vec![preferences_layer];
 
     if let Some(wizard) = &state.oracle_connection.wizard {
-        layers.push(
-            oracle_wizard_modal(wizard)
-                .map(|message| {
-                    PreferencesMessage::OracleConnection(OracleConnectionMessage::Wizard(message))
-                })
-                .into(),
-        );
+        layers.push(oracle_wizard_modal(wizard).map(|message| {
+            PreferencesMessage::OracleConnection(OracleConnectionMessage::Wizard(message))
+        }));
     }
 
     if let Some(editor) = oracle_compiler_editor_modal(&state.oracle_compiler) {
-        layers.push(editor.map(PreferencesMessage::OracleCompiler).into());
+        layers.push(editor.map(PreferencesMessage::OracleCompiler));
     }
 
     if layers.len() == 1 {
@@ -574,12 +565,11 @@ fn tree_row_style(
     selected: bool,
     status: iced::widget::button::Status,
 ) -> iced::widget::button::Style {
-    let background = if selected {
-        Some(Background::Color(ui_theme::current().hover))
-    } else if matches!(
-        status,
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
-    ) {
+    let background = if selected
+        || matches!(
+            status,
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+        ) {
         Some(Background::Color(ui_theme::current().hover))
     } else {
         None

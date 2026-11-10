@@ -22,7 +22,12 @@
 //! use plsqlide::ui::i18n::{self, LocaleInfo};
 //!
 //! i18n::init();
+//! // Locale depends on the user's saved settings.json — pin and restore so the
+//! // doctest is machine-independent and doesn't touch user state.
+//! let saved = i18n::current_code();
+//! assert!(i18n::set_locale("en"));
 //! assert_eq!(i18n::t("ribbon.tab.file"), "File");
+//! assert!(i18n::set_locale(&saved));
 //! assert!(i18n::available().iter().any(|l| l.code == "en"));
 //!
 //! let _ = LocaleInfo {
@@ -118,12 +123,7 @@ impl I18n {
         let _ = fs::create_dir_all(&locales_dir);
         let english = parse_locale_file(EMBEDDED_EN);
         sync_shipped_locale(&locales_dir, "en.json", EMBEDDED_EN, None);
-        sync_shipped_locale(
-            &locales_dir,
-            "ru.json",
-            EMBEDDED_RU,
-            english.as_ref(),
-        );
+        sync_shipped_locale(&locales_dir, "ru.json", EMBEDDED_RU, english.as_ref());
 
         let fallback = parse_locale_file(EMBEDDED_EN)
             .map(|file| file.strings)
@@ -173,8 +173,8 @@ impl I18n {
         self.available = scan_locales(&self.locales_dir);
         if !self.available.iter().any(|l| l.code == self.current_code) {
             self.current_code = DEFAULT_LOCALE.to_string();
-            self.current =
-                load_catalog(&self.locales_dir, DEFAULT_LOCALE).unwrap_or_else(|| self.fallback.clone());
+            self.current = load_catalog(&self.locales_dir, DEFAULT_LOCALE)
+                .unwrap_or_else(|| self.fallback.clone());
         }
     }
 
@@ -191,12 +191,7 @@ impl I18n {
 /// Write shipped locale if missing; otherwise merge keys from the embedded
 /// catalog. Existing custom translations are kept. Values that still match the
 /// English catalog (untranslated placeholders) are refreshed from `embedded`.
-fn sync_shipped_locale(
-    dir: &Path,
-    file_name: &str,
-    contents: &str,
-    english: Option<&LocaleFile>,
-) {
+fn sync_shipped_locale(dir: &Path, file_name: &str, contents: &str, english: Option<&LocaleFile>) {
     let path = dir.join(file_name);
     let Some(embedded) = parse_locale_file(contents) else {
         return;
@@ -295,7 +290,7 @@ fn scan_locales(dir: &Path) -> Vec<LocaleInfo> {
             name: file.name,
         });
     }
-    locales.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    locales.sort_by_key(|a| a.name.to_lowercase());
     // Prefer English first when names collide in order — move `en` to front.
     if let Some(index) = locales.iter().position(|l| l.code == DEFAULT_LOCALE) {
         let en = locales.remove(index);

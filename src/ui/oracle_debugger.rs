@@ -100,9 +100,7 @@ impl OracleDebuggerForm {
                 self.prefs.default_debug_system = value;
             }
             OracleDebuggerMessage::JdwpPortInc => {
-                if self.prefs.default_jdwp_port < u16::MAX {
-                    self.prefs.default_jdwp_port += 1;
-                }
+                self.prefs.default_jdwp_port = self.prefs.default_jdwp_port.saturating_add(1);
             }
             OracleDebuggerMessage::JdwpPortDec => {
                 if self.prefs.default_jdwp_port > 1 {
@@ -310,7 +308,9 @@ fn textarea_block<'a>(
 ) -> Element<'a, OracleDebuggerMessage> {
     column![
         row![
-            text(label).size(LABEL_SIZE).color(ui_theme::current().muted),
+            text(label)
+                .size(LABEL_SIZE)
+                .color(ui_theme::current().muted),
             Space::new().width(6),
             help_icon(tip),
         ]
@@ -372,7 +372,9 @@ where
     let choices: Vec<T> = options.into_iter().collect();
     column![
         row![
-            text(label).size(LABEL_SIZE).color(ui_theme::current().muted),
+            text(label)
+                .size(LABEL_SIZE)
+                .color(ui_theme::current().muted),
             Space::new().width(6),
             help_icon(tip),
         ]

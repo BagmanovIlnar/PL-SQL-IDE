@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use super::CoreResult;
 
 /// How many DB sessions the IDE may open for Oracle work (session manager).
+// ponytail: Multi/Dual/Single Session is Oracle's own terminology; variants are persisted via serde
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum OracleSessionMode {
     #[default]

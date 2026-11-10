@@ -462,18 +462,14 @@ pub fn oracle_wizard_modal(wizard: &OracleClientWizard) -> Element<'_, OracleWiz
 fn welcome_step() -> Element<'static, OracleWizardMessage> {
     column![
         text(i18n::t("wizard.oracle.title")).size(TITLE_SIZE),
-        text(i18n::t("wizard.oracle.welcome.intro"))
-            .size(FIELD_TEXT),
-        text(i18n::t("wizard.oracle.welcome.requires"))
-            .size(FIELD_TEXT),
-        text(i18n::t("wizard.oracle.welcome.download"))
-            .size(FIELD_TEXT),
+        text(i18n::t("wizard.oracle.welcome.intro")).size(FIELD_TEXT),
+        text(i18n::t("wizard.oracle.welcome.requires")).size(FIELD_TEXT),
+        text(i18n::t("wizard.oracle.welcome.download")).size(FIELD_TEXT),
         button(text(INSTANT_CLIENT_URL).size(LABEL_SIZE))
             .padding(Padding::from([2, 0]))
             .style(|_, status| link_button_style(status))
             .on_press(OracleWizardMessage::OpenDownloadLink),
-        text(i18n::t("wizard.oracle.welcome.after_install"))
-            .size(FIELD_TEXT),
+        text(i18n::t("wizard.oracle.welcome.after_install")).size(FIELD_TEXT),
         Space::new().height(8),
         text(i18n::t("wizard.oracle.welcome.note"))
             .size(LABEL_SIZE)
@@ -569,7 +565,9 @@ fn network_step(wizard: &OracleClientWizard) -> Element<'_, OracleWizardMessage>
             wizard.tns_aliases.join(", ")
         };
         column![
-            text(header).size(LABEL_SIZE).color(ui_theme::current().muted),
+            text(header)
+                .size(LABEL_SIZE)
+                .color(ui_theme::current().muted),
             text(aliases).size(FIELD_TEXT),
         ]
         .spacing(2)
@@ -722,7 +720,11 @@ fn oci_library_names() -> &'static [&'static str] {
     }
     #[cfg(target_os = "macos")]
     {
-        &["libclntsh.dylib", "libclntsh.dylib.19.1", "libclntsh.dylib.21.1"]
+        &[
+            "libclntsh.dylib",
+            "libclntsh.dylib.19.1",
+            "libclntsh.dylib.21.1",
+        ]
     }
     #[cfg(target_os = "linux")]
     {
