@@ -178,6 +178,9 @@ struct Worksheet {
     command_edit: bool,
     /// Command window dialog: accumulated "SQL> …" history with output.
     command_dialog: String,
+    /// Selectable text_editor view of `command_dialog`; rebuilt on append
+    /// (selection is lost only when output arrives, not while typing).
+    command_dialog_view: Content,
     /// Output held back while paused; flushed into the dialog on resume.
     command_pending: String,
     /// Command window: execution paused (dialog updates held back).
@@ -482,6 +485,8 @@ enum Message {
     EditorThumbRelease,
     /// Copy a modal's error text to the clipboard.
     CopyError(String),
+    /// Selection/scroll on the read-only console output (edits ignored).
+    ConsoleAction(Action),
     FilterChanged(String),
     /// Toggle “Only current user” in the Objects panel.
     ToggleCurrentUserOnly(bool),
@@ -735,6 +740,7 @@ impl App {
             dirty: false,
             command_edit: false,
             command_dialog: String::new(),
+            command_dialog_view: Content::new(),
             command_pending: String::new(),
             command_paused: false,
             command_input: String::new(),
@@ -1179,6 +1185,15 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
+        Message::ConsoleAction(action) => {
+            // Console output is read-only: allow selection/scroll, ignore edits.
+            if !matches!(action, Action::Edit(_)) {
+                if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                    sheet.command_dialog_view.perform(action);
+                }
+            }
+            Task::none()
+        }
         Message::VarDetails(name, value) => {
             app.var_details = Some((name, value));
             Task::none()
@@ -1495,11 +1510,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     raw.clone()
                 };
                 if sheet.command_dialog.is_empty() {
-                    sheet.command_dialog.push_str(&banner);
+                    dialog_push(sheet, &banner);
                 }
                 // Echo exactly what was typed ("/" stays "/"), run the resolved command.
                 let display = console_expand_tabs(&raw);
-                sheet.command_dialog.push_str(&format!("SQL> {display}\n"));
+                dialog_push(sheet, &format!("SQL> {display}\n"));
                 cmd
             };
             // Echo is already in the dialog — only the output comes later.
@@ -1516,7 +1531,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             if sheet.command_paused {
                 sheet.command_paused = false;
                 let pending = std::mem::take(&mut sheet.command_pending);
-                sheet.command_dialog.push_str(&pending);
+                dialog_push(sheet, &pending);
                 app.metrics = i18n::t("status.resumed");
             } else {
                 sheet.command_paused = true;
@@ -1990,7 +2005,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                             if sheet.command_paused {
                                 sheet.command_pending.push_str(&entry);
                             } else {
-                                sheet.command_dialog.push_str(&entry);
+                                dialog_push(sheet, &entry);
                             }
                         }
                     }
@@ -2049,7 +2064,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                             if sheet.command_paused {
                                 sheet.command_pending.push_str(&entry);
                             } else {
-                                sheet.command_dialog.push_str(&entry);
+                                dialog_push(sheet, &entry);
                             }
                         }
                     }
@@ -5212,6 +5227,12 @@ fn console_expand_tabs(value: &str) -> String {
     value.replace('\t', "    ")
 }
 
+/// Appends console text and rebuilds the selectable text_editor view.
+fn dialog_push(sheet: &mut Worksheet, value: &str) {
+    sheet.command_dialog.push_str(value);
+    sheet.command_dialog_view = Content::with_text(&sheet.command_dialog);
+}
+
 /// SQL*Plus terminators: a lone `/` line means "run" and a trailing `;` after
 /// a plain SQL statement is client-side — neither reaches the server.
 /// PL/SQL blocks (declare/begin/create/with…) keep their semicolons.
@@ -5363,6 +5384,17 @@ fn console_input_style() -> iced::widget::text_input::Style {
     }
 }
 
+/// Same look as the console text: transparent, no borders.
+fn console_editor_style(_status: text_editor::Status) -> text_editor::Style {
+    text_editor::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: Border::default(),
+        placeholder: ui_theme::current().muted,
+        value: ui_theme::current().text,
+        selection: ui_theme::current().accent,
+    }
+}
+
 /// Command window (like PL/SQL Developer): Execute / Pause / Stop buttons
 /// above an inner tabsheet with the Dialog (interactive console session)
 /// and Edit tabs.
@@ -5450,10 +5482,14 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             })
             .unwrap_or(false);
         let history: Element<'a, Message> = if !dialog.is_empty() {
-            text(dialog)
+            // Selectable console: read-only editor (mouse selection + Cmd+C),
+            // no wrapping — scrollbars come from the outer scrollable.
+            text_editor(&sheet.command_dialog_view)
                 .size(12)
                 .font(Font::MONOSPACE)
                 .wrapping(iced::widget::text::Wrapping::None)
+                .on_action(Message::ConsoleAction)
+                .style(|_, status| console_editor_style(status))
                 .into()
         } else if let Some(p) = profile.filter(|_| connected) {
             text(command_banner_for(p))
