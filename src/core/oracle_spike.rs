@@ -151,22 +151,55 @@ fn run_oracle_spike_blocking(
         // exists in this session before the block inserts into it, then
         // read the returned values back as a two-column result.
         let capture = sql.starts_with("DECLARE\nPLSQLIDE_P");
+        // ponytail: OUT capture needs PLSQLIDE_BIND_OUT; on med2dev DDL is gated
+        // (DEV_HELLO + SET_MED_TASK), so probe and strip capture lines if absent.
+        // Upgrade: drop stripping once the table is created for real.
+        let mut out_ready = false;
         if capture {
-            let _ = connection.execute(
-                "create global temporary table plsqlide_bind_out \
-                 (name varchar2(128), val varchar2(4000)) on commit preserve rows",
-                &[],
-            );
-        }
-        connection
-            .execute(&sql, &[])
-            .map_err(|err| CoreError::Query(err.to_string()))?;
-        info!("oracle statement executed");
-        if capture {
-            let (cols, vals, _) =
-                fetch_query_rows(&connection, "select NAME, VAL from plsqlide_bind_out", &request)?;
-            (cols, vals, "statement executed".to_string())
+            out_ready = fetch_query_rows(
+                &connection,
+                "select count(*) from user_tables where table_name = 'PLSQLIDE_BIND_OUT'",
+                &request,
+            )
+            .ok()
+            .and_then(|(_, rows, _)| {
+                rows.first()
+                    .and_then(|r| r.first().cloned())
+                    .map(|n| n != "0")
+            })
+            .unwrap_or(false);
+            let sql = if out_ready {
+                sql
+            } else {
+                sql.lines()
+                    .filter(|l| !l.contains("PLSQLIDE_BIND_OUT"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            connection
+                .execute(&sql, &[])
+                .map_err(|err| CoreError::Query(err.to_string()))?;
+            info!("oracle statement executed");
+            if out_ready {
+                let (cols, vals, _) = fetch_query_rows(
+                    &connection,
+                    "select NAME, VAL from plsqlide_bind_out",
+                    &request,
+                )?;
+                (cols, vals, "statement executed".to_string())
+            } else {
+                (
+                    Vec::new(),
+                    Vec::new(),
+                    "statement executed (OUT capture skipped: PLSQLIDE_BIND_OUT table missing)"
+                        .to_string(),
+                )
+            }
         } else {
+            connection
+                .execute(&sql, &[])
+                .map_err(|err| CoreError::Query(err.to_string()))?;
+            info!("oracle statement executed");
             (Vec::new(), Vec::new(), "statement executed".to_string())
         }
     } else {

@@ -44,6 +44,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
         ),
     ];
+    // User's failing case: anonymous block with a bind, full Execute path
+    // (auto-filled params + capture wrap), expecting the OUT-skip fallback.
+    let src = "DECLARE\n      v_x NUMBER;\nBEGIN\n      :dcdcd := 'dcdcd';\nEND;";
+    let params = plsqlide::ui::parameters::parse_binds(src)
+        .into_iter()
+        .map(|n| plsqlide::ui::parameters::Parameter::new(
+            n, plsqlide::ui::parameters::ParamDataType::Oracle(
+                plsqlide::ui::parameters::OracleType::Varchar2)))
+        .collect::<Vec<_>>();
+    let (wrapped, _off) = plsqlide::ui::parameters::bind_wrap(src, &params, true);
+    println!("\n=== bind block (capture wrapped) ===\n{wrapped}");
+    let result = run_oracle_spike(OracleSpikeRequest {
+        connect_descriptor: profile.oracle_connect_descriptor(),
+        username: profile.username.clone(),
+        password: profile.password.clone(),
+        connect_as: ConnectAs::Normal,
+        sql: Some(wrapped),
+        timeout_ms: Some(10_000),
+        cancel: false,
+        max_rows: None,
+    }).await?;
+    println!("ok={} rows={} msg={:?}", result.connected, result.rows.len(), result.message);
+    for row in &result.rows { println!("out: {row:?}"); }
+
     for (label, sql, max_rows) in probes {
         println!("\n=== {label} ===");
         println!("running: {sql} (max_rows: {max_rows:?})");
