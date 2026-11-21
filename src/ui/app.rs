@@ -2597,11 +2597,13 @@ fn run_spike_with_sql(
     // Command window: remember what we are running to echo it in the Dialog.
     // Submit path pre-sets Some("") (echo already shown) — do not clobber it.
     if app.command_echo.is_none() {
-        app.command_echo = app
-            .worksheets
-            .get(app.active_tab)
-            .filter(|sheet| sheet.kind == WindowKind::Command)
-            .map(|_| sql_text.clone());
+        if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+            if sheet.kind == WindowKind::Command {
+                // Running from Правка: jump to Диалог where the result lands.
+                sheet.command_edit = false;
+                app.command_echo = Some(sql_text.clone());
+            }
+        }
     }
     // Test window: discover `:NAME` binds, auto-fill the parameters panel,
     // and wrap the block so panel values bind IN and OUT values come back.
