@@ -5548,26 +5548,14 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
         app.busy,
         Message::MenuStop,
     );
-    // Copy the whole dialog (commands + results) — the plain-text console is
-    // not mouse-selectable, this is the copy path.
-    let copy = toolbar_icon_button(
-        text("⧉").size(13),
-        i18n::t("dialog.copy"),
-        dialog.is_empty(),
-        Message::CopyError(dialog.clone()),
-    );
-    let bar = container(
-        row![exec, pause, stop, copy]
-            .spacing(6)
-            .align_y(Vertical::Center),
-    )
-    .padding(Padding::from([4, 10]))
-    .width(Fill)
-    .style(|_| container::Style {
-        background: Some(Background::Color(ui_theme::current().ribbon_body_bg)),
-        text_color: Some(ui_theme::current().text),
-        ..container::Style::default()
-    });
+    let bar = container(row![exec, pause, stop].spacing(6).align_y(Vertical::Center))
+        .padding(Padding::from([4, 10]))
+        .width(Fill)
+        .style(|_| container::Style {
+            background: Some(Background::Color(ui_theme::current().ribbon_body_bg)),
+            text_color: Some(ui_theme::current().text),
+            ..container::Style::default()
+        });
 
     let tab_button = |label: String, active: bool, message: Message| -> Element<'a, Message> {
         button(text(label).size(11))
