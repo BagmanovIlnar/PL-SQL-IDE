@@ -974,9 +974,155 @@ fn tab_style(active: bool, status: iced::widget::button::Status) -> iced::widget
     }
 }
 
+/// Calls `repl` for every named bind (`:NAME`) found in `source` outside
+/// string literals and comments, replacing it with the returned text.
+///
+/// ponytail: q'…' and bracketed literals are not recognised — rare in blocks.
+fn map_binds(source: &str, repl: &mut dyn FnMut(&str) -> String) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let (mut out, mut i, n) = (String::with_capacity(source.len()), 0usize, chars.len());
+    while i < n {
+        match chars[i] {
+            '-' if i + 1 < n && chars[i + 1] == '-' => {
+                while i < n && chars[i] != '\n' {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+            }
+            '/' if i + 1 < n && chars[i + 1] == '*' => {
+                i += 2;
+                while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+                out.push_str("*/");
+                i = (i + 2).min(n);
+            }
+            '\'' => {
+                out.push('\'');
+                i += 1;
+                while i < n {
+                    out.push(chars[i]);
+                    if chars[i] == '\'' {
+                        // Doubled quote stays inside the literal.
+                        if i + 1 < n && chars[i + 1] == '\'' {
+                            out.push('\'');
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            ':' if i + 1 < n && (chars[i + 1].is_alphabetic() || chars[i + 1] == '_') => {
+                i += 1;
+                let start = i;
+                while i < n
+                    && (chars[i].is_alphanumeric()
+                        || chars[i] == '_'
+                        || chars[i] == '$'
+                        || chars[i] == '#')
+                {
+                    i += 1;
+                }
+                let name: String = chars[start..i].iter().collect();
+                out.push_str(&repl(&name));
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Named bind placeholders in `source` (`:NAME`), uppercased, deduped,
+/// in first-appearance order. Literals and comments are skipped.
+pub fn parse_binds(source: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    map_binds(source, &mut |name| {
+        let upper = name.to_ascii_uppercase();
+        if !names.contains(&upper) {
+            names.push(upper);
+        }
+        String::new()
+    });
+    names
+}
+
+/// Substitutes every `:NAME` bind with the `PLSQLIDE_P_NAME` variable.
+fn bind_substitute(source: &str) -> String {
+    map_binds(source, &mut |name| {
+        format!("PLSQLIDE_P_{}", name.to_ascii_uppercase())
+    })
+}
+
+/// Wraps an anonymous block so its `:NAME` binds become PL/SQL variables:
+/// each parameter is declared and IN-initialized from its panel value, and
+/// substituted into the text. With `capture`, the wrapper also inserts the
+/// final values into PLSQLIDE_BIND_OUT so the app can read them back.
+/// Returns the wrapped SQL and the line offset the block body moved down by
+/// (the debugger maps pauses back to editor lines with it).
+pub fn bind_wrap(source: &str, params: &[Parameter], capture: bool) -> (String, usize) {
+    if params.is_empty() {
+        return (source.to_string(), 0);
+    }
+    let mut wrapped = String::from("DECLARE\n");
+    for p in params {
+        let sql_type = match p.data_type.label() {
+            "VARCHAR2" => "VARCHAR2(4000)",
+            other => other,
+        };
+        let lit = if p.value.trim().is_empty() {
+            "NULL".to_string()
+        } else {
+            format!("'{}'", p.value.replace('\'', "''"))
+        };
+        wrapped.push_str(&format!(
+            "PLSQLIDE_P_{} {} := {lit};\n",
+            p.name.to_ascii_uppercase(),
+            sql_type
+        ));
+    }
+    wrapped.push_str("BEGIN\n");
+    wrapped.push_str(&bind_substitute(source));
+    if capture {
+        wrapped.push_str("\nDELETE FROM PLSQLIDE_BIND_OUT;\n");
+        for p in params {
+            let name = p.name.to_ascii_uppercase();
+            wrapped.push_str(&format!(
+                "INSERT INTO PLSQLIDE_BIND_OUT VALUES('__OUT__{name}', PLSQLIDE_P_{name});\n"
+            ));
+        }
+    }
+    wrapped.push_str("END;\n");
+    (wrapped, params.len() + 2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_bind_names_skipping_literals_and_comments() {
+        let src = "DECLARE\n v NUMBER;\nBEGIN\n :Test := 'cd:x'; -- :NOComm\n/* :NOblock */\n x := :OUT_P;\n y := :Test;\nEND;";
+        assert_eq!(parse_binds(src), vec!["TEST", "OUT_P"]);
+    }
+
+    #[test]
+    fn wrap_declares_substitutes_and_offsets() {
+        let params = vec![Parameter::new("Test", ParamDataType::Oracle(OracleType::Varchar2))];
+        let (sql, offset) = bind_wrap("BEGIN\n :TEST := 'a''b';\nEND;", &params, true);
+        assert_eq!(offset, 3);
+        assert!(sql.starts_with(
+            "DECLARE\nPLSQLIDE_P_TEST VARCHAR2(4000) := NULL;\nBEGIN\nBEGIN\n PLSQLIDE_P_TEST := 'a''b';\nEND;\n"
+        ));
+        assert!(sql.contains("INSERT INTO PLSQLIDE_BIND_OUT VALUES('__OUT__TEST', PLSQLIDE_P_TEST);"));
+        assert_eq!(bind_wrap("BEGIN NULL; END;", &[], true).0, "BEGIN NULL; END;");
+    }
 
     #[test]
     fn add_select_delete_roundtrip() {

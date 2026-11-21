@@ -66,6 +66,9 @@ pub struct DebugSession {
     pub system: DebugSystem,
     pub status: String,
     pub current_line: Option<usize>,
+    /// Lines injected above the block by bind wrapping — pauses are mapped
+    /// back to editor lines by subtracting this.
+    pub bind_offset: usize,
     pub cursor_line: Option<usize>,
     pub breakpoints: Vec<Breakpoint>,
 }

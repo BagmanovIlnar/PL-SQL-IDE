@@ -818,7 +818,25 @@ impl App {
 
         let prefs = oracle_debugger_prefs::load();
         let key = self.connection_key();
-        let source = self.active_content().map(|c| c.text()).unwrap_or_default();
+        let mut source = self.active_content().map(|c| c.text()).unwrap_or_default();
+        // Test window: bind `:NAME` parameters before handing the source to
+        // the engine; remember the line offset so pauses map back to editor
+        // lines (the wrapper injects declarations above the block).
+        self.debug_session.bind_offset = 0;
+        let test_window = self
+            .worksheets
+            .get(self.active_tab)
+            .map(|sheet| sheet.kind == WindowKind::Test)
+            .unwrap_or(false);
+        if test_window && profile.db_kind == DbKind::Oracle {
+            let text = source.clone();
+            let params = auto_fill_bind_params(self, &text);
+            if !params.is_empty() {
+                let (wrapped, offset) = crate::ui::parameters::bind_wrap(&text, &params, false);
+                source = wrapped;
+                self.debug_session.bind_offset = offset;
+            }
+        }
         let request = DebugEngineRequest {
             profile,
             command,
@@ -1829,7 +1847,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.debug_session.active = event.active && !over;
                     app.debug_session.system = event.system;
                     app.debug_session.status = event.status.clone();
-                    app.debug_session.current_line = event.current_line;
+                    // Map wrapper-injected lines back to the editor text.
+                    app.debug_session.current_line = event
+                        .current_line
+                        .map(|l| l.saturating_sub(app.debug_session.bind_offset).max(1));
                     app.metrics = event.status.clone();
                     if event.status.starts_with("block failed") {
                         app.error_modal = Some(event.message.clone());
@@ -2061,6 +2082,35 @@ const PAGE_HELPER_COLUMN: &str = "_PLSQLIDE_RN";
 /// fetch `limit` rows (or everything when `None`). DML and multi-statement
 /// text pass through untouched. Oracle uses the ROWNUM trick (pre-12c safe);
 /// Postgres uses OFFSET/FETCH.
+/// Test window: discover `:NAME` binds in the block and add any new ones to
+/// the bottom parameters panel (default type, empty value — values survive
+/// re-parses). Returns the panel rows for bind wrapping.
+fn auto_fill_bind_params(app: &mut App, text: &str) -> Vec<crate::ui::parameters::Parameter> {
+    let names = crate::ui::parameters::parse_binds(text);
+    let Some(kind) = app
+        .active_worksheet_profile()
+        .map(|p| crate::ui::parameters::ParamDataType::default_for(p.db_kind))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(panel) = app.active_parameters_mut() {
+        for name in names {
+            if !panel
+                .rows
+                .iter()
+                .any(|p| p.name.eq_ignore_ascii_case(&name))
+            {
+                panel
+                    .rows
+                    .push(crate::ui::parameters::Parameter::new(name.clone(), kind));
+            }
+        }
+        out = panel.rows.clone();
+    }
+    out
+}
+
 fn page_select(sql: &str, kind: DbKind, offset: usize, limit: Option<usize>) -> String {
     let trimmed = strip_leading_comments(sql).trim_end_matches(';').trim();
     let upper = trimmed.to_ascii_uppercase();
@@ -2110,6 +2160,26 @@ fn run_spike(app: &mut App, mode: FetchMode) -> Task<Message> {
 
     let sql = app.active_content().map(|content| content.text());
     let sql_text = sql.clone().unwrap_or_default();
+    // Test window: discover `:NAME` binds, auto-fill the parameters panel,
+    // and wrap the block so panel values bind IN and OUT values come back.
+    let sql = if profile.db_kind == DbKind::Oracle
+        && app
+            .worksheets
+            .get(app.active_tab)
+            .map(|sheet| sheet.kind == WindowKind::Test)
+            .unwrap_or(false)
+    {
+        sql.map(|text| {
+            let params = auto_fill_bind_params(app, &text);
+            if params.is_empty() {
+                text
+            } else {
+                crate::ui::parameters::bind_wrap(&text, &params, true).0
+            }
+        })
+    } else {
+        sql
+    };
     // Server-side paging: first run loads the first page, fetch-next/all
     // continue from the rows already in the grid buffer.
     let offset = app

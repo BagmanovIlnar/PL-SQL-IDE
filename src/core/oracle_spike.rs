@@ -147,11 +147,28 @@ fn run_oracle_spike_blocking(
         .to_ascii_uppercase();
     let is_query = head.starts_with("SELECT") || head.starts_with("WITH");
     let (columns, values, message) = if !is_query {
+        // Bind wrapper ran (Test window) — make sure the OUT-capture table
+        // exists in this session before the block inserts into it, then
+        // read the returned values back as a two-column result.
+        let capture = sql.starts_with("DECLARE\nPLSQLIDE_P");
+        if capture {
+            let _ = connection.execute(
+                "create global temporary table plsqlide_bind_out \
+                 (name varchar2(128), val varchar2(4000)) on commit preserve rows",
+                &[],
+            );
+        }
         connection
             .execute(&sql, &[])
             .map_err(|err| CoreError::Query(err.to_string()))?;
         info!("oracle statement executed");
-        (Vec::new(), Vec::new(), "statement executed".to_string())
+        if capture {
+            let (cols, vals, _) =
+                fetch_query_rows(&connection, "select NAME, VAL from plsqlide_bind_out", &request)?;
+            (cols, vals, "statement executed".to_string())
+        } else {
+            (Vec::new(), Vec::new(), "statement executed".to_string())
+        }
     } else {
         fetch_query_rows(&connection, &sql, &request)?
     };
