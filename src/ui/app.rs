@@ -128,6 +128,8 @@ struct ResizeDrag {
 enum BottomTab {
     Parameters,
     Result,
+    Stack,
+    Variables,
 }
 
 /// Structured outcome of a spike run: text for output plus grid data.
@@ -1882,6 +1884,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.debug_session.active = event.active && !over;
                     app.debug_session.system = event.system;
                     app.debug_session.status = event.status.clone();
+                    app.debug_session.variables = event.variables.clone();
                     // Map wrapper-injected lines back to the editor text.
                     app.debug_session.current_line = event
                         .current_line
@@ -4482,6 +4485,23 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
                     .map(Message::Param)
                     .into()
             }
+            BottomTab::Stack => {
+                let lines = if app.debug_session.active {
+                    match app.debug_session.current_line {
+                        Some(line) => vec![i18n::t_args(
+                            "debug.stack_frame",
+                            &[("line", &line.to_string())],
+                        )],
+                        None => vec![i18n::t("debug.stack_running")],
+                    }
+                } else {
+                    Vec::new()
+                };
+                debug_list_view(lines, app.parameters_height).into()
+            }
+            BottomTab::Variables => {
+                debug_list_view(app.debug_session.variables.clone(), app.parameters_height).into()
+            }
         };
         column![
             editor_stack,
@@ -4498,6 +4518,25 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
     }
 }
 
+/// Monospace list used by the Stack and Variables tabs of the debug panel.
+fn debug_list_view(lines: Vec<String>, height: f32) -> Element<'static, Message> {
+    if lines.is_empty() {
+        return container(
+            scrollable(text(i18n::t("debug.list_empty")).size(12).color(ui_theme::current().muted))
+                .height(Fill)
+                .width(Fill),
+        )
+        .height(height)
+        .width(Fill)
+        .into();
+    }
+    let mut col = column![].spacing(2).padding(Padding::from([6, 10]));
+    for line in lines {
+        col = col.push(text(line).size(12).font(Font::MONOSPACE));
+    }
+    scrollable(col).height(height).width(Fill).into()
+}
+
 /// Tab strip of the bottom panel (Parameters / Results).
 fn panel_tab_strip(show_result: bool, active: BottomTab) -> Element<'static, Message> {
     let mut strip = row![]
@@ -4509,6 +4548,18 @@ fn panel_tab_strip(show_result: bool, active: BottomTab) -> Element<'static, Mes
         BottomTab::Parameters,
         active,
     ));
+    if !show_result {
+        strip = strip.push(panel_tab(
+            i18n::t("panel.stack"),
+            BottomTab::Stack,
+            active,
+        ));
+        strip = strip.push(panel_tab(
+            i18n::t("panel.variables"),
+            BottomTab::Variables,
+            active,
+        ));
+    }
     if show_result {
         strip = strip.push(panel_tab(
             i18n::t("panel.result"),

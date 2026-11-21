@@ -1211,7 +1211,7 @@ fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEv
                         error: Mutex::new(None),
                     })
                 });
-            let (status, current, msgs) = wait_pause(id, &pipe, &finished, false)?;
+            let (status, current, msgs, _) = wait_pause(id, &pipe, &finished, false)?;
             Ok(DebugEngineEvent {
                 active: true,
                 system: DebugSystem::DbmsDebug,
@@ -1366,7 +1366,8 @@ fn instrumented_launch(
                 log.push("block running under instrumentation".into());
             }
 
-            let (status, line, msgs) = wait_pause(id, &pipe, &finished, resume_first)?;
+            let (status, line, msgs, vars) =
+                wait_pause(id, &pipe, &finished, resume_first)?;
             log.extend(msgs);
             if status == "program finished" {
                 if let Ok(mut guard) = BINDOUTS.lock() {
@@ -1384,7 +1385,7 @@ fn instrumented_launch(
                 current_line: line,
                 message: status,
                 log,
-                variables: Vec::new(),
+                variables: vars,
             })
         }
 
@@ -1423,11 +1424,14 @@ fn wait_pause(
     pipe: &str,
     finished: &std::sync::Arc<RunState>,
     first_stop: bool,
-) -> CoreResult<(String, Option<usize>, Vec<String>)> {
+) -> CoreResult<(String, Option<usize>, Vec<String>, Vec<String>)> {
     use super::oracle_pool::debug_access;
     use std::sync::atomic::Ordering;
 
     let mut log = Vec::new();
+    // Declared-variable values arrive as a separate pipe message just
+    // before the next PAUSE — collect them here.
+    let mut vars = Vec::new();
     for _ in 0..60 {
         if finished.finished.load(Ordering::SeqCst) {
             let error = finished
@@ -1439,35 +1443,51 @@ fn wait_pause(
             if error.is_empty() {
                 tracing::info!("debug: block finished, no pause");
                 log.push("block finished".into());
-                return Ok(("program finished".into(), None, log));
+                return Ok(("program finished".into(), None, log, Vec::new()));
             }
             tracing::info!("debug: block failed: {error}");
             log.push(error.clone());
-            return Ok((format!("block failed: {error}"), None, log));
+            return Ok((format!("block failed: {error}"), None, log, Vec::new()));
         }
+        // ponytail: the message comes back via a CLOB OUT bind — the old
+        // SET_IDENTIFIER channel truncated at 64 bytes and this 11.2 build
+        // stops reporting pipe items after the first UNPACK.
         let event = debug_access::with_ctrl_mut(id, |ctrl| {
-            ctrl.execute(
-                &format!(
-                    "DECLARE t INTEGER; m VARCHAR2(100); BEGIN \
+            let mut stmt = ctrl
+                .statement(&format!(
+                    "DECLARE t INTEGER; m VARCHAR2(32767); BEGIN \
                      t := SYS.DBMS_PIPE.RECEIVE_MESSAGE('{pipe}_E', 1); \
                      IF t = 0 THEN SYS.DBMS_PIPE.UNPACK_MESSAGE(m); END IF; \
-                     DBMS_SESSION.SET_IDENTIFIER('evt=' || NVL(m, 'none')); END;"
-                ),
-                &[],
-            )
-            .map_err(|err| CoreError::Query(format!("pipe recv: {err}")))?;
-            ctrl.query_row_as::<String>(
-                "SELECT SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') FROM DUAL",
-                &[],
-            )
-            .map_err(|err| CoreError::Query(format!("client identifier: {err}")))
+                     :out := m; END;"
+                ))
+                .build()
+                .map_err(|err| CoreError::Query(format!("pipe recv stmt: {err}")))?;
+            stmt.execute(&[&None::<oracle::sql_type::Clob>])
+                .map_err(|err| CoreError::Query(format!("pipe recv: {err}")))?;
+            let mut clob = stmt
+                .bind_value::<usize, oracle::sql_type::Clob>(1)
+                .map_err(|err| CoreError::Query(format!("pipe recv bind: {err}")))?;
+            use std::io::Read;
+            let mut out = String::new();
+            clob
+                .read_to_string(&mut out)
+                .map_err(|err| CoreError::Query(format!("pipe recv read: {err}")))?;
+            Ok::<String, CoreError>(out)
         });
         match event {
             Ok(out) => {
-                if let Some(rest) = out.strip_prefix("evt=PAUSE ") {
+                for line in out.lines() {
+                    if let Some(entry) = line.strip_prefix("V ") {
+                        if let Some((name, value)) = entry.split_once('=') {
+                            vars.push(format!("{name} = {value}"));
+                        }
+                    }
+                }
+                if let Some(rest) = out.strip_prefix("PAUSE ") {
                     if let Ok(line) = rest.trim().parse::<usize>() {
                         log.push(format!("paused at line {line}"));
-                        return Ok((format!("paused at line {line}"), Some(line), log));
+                        log.push(format!("{} variable(s)", vars.len()));
+                        return Ok((format!("paused at line {line}"), Some(line), log, vars));
                     }
                 }
             }
@@ -1479,8 +1499,9 @@ fn wait_pause(
         let _ = first_stop;
     }
     log.push("no pause event within the wait budget".into());
-    Ok(("waiting… (no pause yet)".into(), None, log))
+    Ok(("waiting… (no pause yet)".into(), None, log, Vec::new()))
 }
+
 
 /// Per-connection run state: finished flag + block execution error.
 #[cfg(feature = "oracle")]

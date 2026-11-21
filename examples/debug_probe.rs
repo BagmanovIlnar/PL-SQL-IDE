@@ -27,9 +27,13 @@ async fn run_main() {
 
     let source = "DECLARE
       v_x NUMBER;
+      v_name VARCHAR2(20) := 'ильнар';
+      v_when DATE := SYSDATE;
+      v_flag BOOLEAN := TRUE;
 BEGIN
       :TEST := 'cdcd';
-      v_x := 1;
+      v_x := 42;
+      v_name := 'тест';
 END;";
     let mut params = plsqlide::ui::parameters::parse_binds(source)
         .into_iter()
@@ -47,7 +51,7 @@ END;";
             profile: profile.clone(),
             command,
             prefs: load(),
-            breakpoints: vec![Breakpoint { line: 7 }],
+            breakpoints: vec![Breakpoint { line: 11 }],
             cursor_line: None,
             source: source.to_string(),
             connection_key: profile.name.clone(),

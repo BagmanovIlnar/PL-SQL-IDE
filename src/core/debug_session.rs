@@ -71,6 +71,8 @@ pub struct DebugSession {
     pub bind_offset: usize,
     pub cursor_line: Option<usize>,
     pub breakpoints: Vec<Breakpoint>,
+    /// Declared-variable values reported by the last pause.
+    pub variables: Vec<String>,
 }
 
 impl DebugSession {
