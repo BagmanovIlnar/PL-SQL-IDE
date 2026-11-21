@@ -400,6 +400,10 @@ struct App {
     /// Cmd+A pressed in a command window: the whole dialog is highlighted
     /// until copied (Cmd+C) or typing resets it.
     command_all_selected: bool,
+    /// Mouse line-selection in the console: anchor row, then the picked
+    /// range. Clicks only highlight rows — keyboard focus stays untouched.
+    command_sel_anchor: Option<usize>,
+    command_sel: Option<(usize, usize)>,
     /// Open details dialog for a debug variable: (name, selectable value).
     var_details: Option<(String, String)>,
     dialog: Option<ConnectionDraft>,
@@ -492,6 +496,8 @@ enum Message {
     CommandSelectAll,
     /// Cmd+C in a command window: copy the whole console dialog.
     CommandCopyAll,
+    /// Click on a dialog line: first click anchors, second completes range.
+    CommandSelectRow(usize),
     /// Put keyboard focus on the SQL> input (deferred, post-render).
     CommandFocus,
     FilterChanged(String),
@@ -640,6 +646,8 @@ impl App {
             connect_error: None,
             error_modal: None,
             command_all_selected: false,
+            command_sel_anchor: None,
+            command_sel: None,
             dialog: None,
             dialog_error: None,
             preferences: None,
@@ -1200,6 +1208,16 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
+        Message::CommandSelectRow(row) => {
+            match app.command_sel_anchor {
+                None => app.command_sel_anchor = Some(row),
+                Some(a) => {
+                    app.command_sel = Some((a.min(row), a.max(row)));
+                    app.command_sel_anchor = None;
+                }
+            }
+            Task::none()
+        }
         Message::CommandSelectAll => {
             let console_active = app
                 .worksheets
@@ -1223,11 +1241,23 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             let Some(sheet) = app.worksheets.get(app.active_tab) else {
                 return Task::none();
             };
-            let text = sheet.command_dialog.clone();
+            // A clicked line range copies just those lines; otherwise all.
+            let text = match app.command_sel {
+                Some((a, b)) => sheet
+                    .command_dialog
+                    .lines()
+                    .skip(a)
+                    .take(b - a + 1)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                None => sheet.command_dialog.clone(),
+            };
             if text.is_empty() {
                 return Task::none();
             }
             app.command_all_selected = false;
+            app.command_sel = None;
+            app.command_sel_anchor = None;
             app.metrics = i18n::t("status.copied");
             iced::clipboard::write(text)
         }
@@ -1539,6 +1569,8 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         Message::CommandInput(value) => {
             tracing::info!(target: "command", chars = value.chars().count(), "input keystroke reached SQL> line");
             app.command_all_selected = false;
+            app.command_sel = None;
+            app.command_sel_anchor = None;
             if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                 sheet.command_input = value;
             }
@@ -5608,23 +5640,44 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             })
             .unwrap_or(false);
         let history: Element<'a, Message> = if !dialog.is_empty() {
-            // Plain text (v3): clicks and keys never get stolen from the
-            // SQL> input; no wrapping, both scrollbars on the container.
-            let dialog_text = text(dialog)
-                .size(12)
-                .font(Font::MONOSPACE)
-                .wrapping(iced::widget::text::Wrapping::None);
+            // Plain text per line (v3 + selection): mouse_area clicks only
+            // highlight rows — keyboard focus and typing are never touched.
+            // ponytail: whole-line selection; per-char drag needs a canvas
+            // widget if line granularity ever stops being enough.
+            let accent = ui_theme::current().accent;
+            let rows: Vec<Element<'a, Message>> = dialog
+                .lines()
+                .enumerate()
+                .map(|(i, line)| {
+                    let selected = app.command_sel.map_or(false, |(a, b)| i >= a && i <= b)
+                        || app.command_sel_anchor == Some(i);
+                    let line_text = text(line.to_string()).size(12).font(Font::MONOSPACE);
+                    let row: Element<'a, Message> = if selected {
+                        container(line_text)
+                            .style(move |_| container::Style {
+                                background: Some(Background::Color(Color { a: 0.30, ..accent })),
+                                ..container::Style::default()
+                            })
+                            .into()
+                    } else {
+                        line_text.into()
+                    };
+                    mouse_area(row)
+                        .on_press(Message::CommandSelectRow(i))
+                        .into()
+                })
+                .collect();
+            let dialog_view: Element<'a, Message> = column(rows).spacing(0).width(Fill).into();
             // Cmd+A highlights EVERYTHING; Cmd+C copies it.
             if app.command_all_selected {
-                let accent = ui_theme::current().accent;
-                container(dialog_text)
+                container(dialog_view)
                     .style(move |_| container::Style {
                         background: Some(Background::Color(Color { a: 0.30, ..accent })),
                         ..container::Style::default()
                     })
                     .into()
             } else {
-                dialog_text.into()
+                dialog_view
             }
         } else if let Some(p) = profile.filter(|_| connected) {
             text(command_banner_for(p))
