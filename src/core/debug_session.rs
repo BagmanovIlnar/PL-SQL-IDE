@@ -60,6 +60,9 @@ pub struct DebugCommandResult {
 #[derive(Debug, Clone, Default)]
 pub struct DebugSession {
     pub active: bool,
+    /// Worksheet tab that owns the session (toolbar/highlight show it only
+    /// there — other tabs must not see another window's debug session).
+    pub tab: Option<usize>,
     pub system: DebugSystem,
     pub status: String,
     pub current_line: Option<usize>,

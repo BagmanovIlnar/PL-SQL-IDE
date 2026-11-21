@@ -11,6 +11,7 @@ pub mod oracle_prefs;
 pub mod oracle_wizard;
 pub mod parameters;
 pub mod preferences;
+pub mod result_grid;
 pub mod theme;
 pub mod window_kind;
 

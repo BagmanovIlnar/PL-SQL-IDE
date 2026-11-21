@@ -2,7 +2,8 @@
 
 use std::sync::{LazyLock, RwLock};
 
-use iced::Color;
+use iced::widget::{button, container};
+use iced::{Background, Border, Color};
 
 /// User-selected appearance preference.
 ///
@@ -131,6 +132,140 @@ pub fn current() -> Palette {
         .read()
         .map(|guard| *guard)
         .unwrap_or_else(|_| Palette::light())
+}
+
+/// Status green (connected / success). Shared so every screen agrees.
+pub fn success() -> Color {
+    Color::from_rgb(0.12, 0.72, 0.32)
+}
+
+/// Status red (failed / errors).
+pub fn error() -> Color {
+    Color::from_rgb(0.90, 0.28, 0.28)
+}
+
+/// Status amber (paused / warnings).
+pub fn warning() -> Color {
+    Color::from_rgb(0.95, 0.75, 0.15)
+}
+
+/// Accent, slightly brightened for hover feedback.
+fn accent_hover() -> Color {
+    let a = current().accent;
+    Color {
+        r: (a.r * 1.15).min(1.0),
+        g: (a.g * 1.15).min(1.0),
+        b: (a.b * 1.15).min(1.0),
+        a: 1.0,
+    }
+}
+
+/// Neutral chrome button (toolbars, secondary dialog actions).
+pub fn chrome_button(status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            Some(Background::Color(current().hover))
+        }
+        _ => Some(Background::Color(current().chrome_bg)),
+    };
+    // Disabled buttons are dimmed so availability is visible at a glance.
+    let text_color = if status == button::Status::Disabled {
+        Color { a: 0.35, ..current().text }
+    } else {
+        current().text
+    };
+    button::Style {
+        background,
+        text_color,
+        border: Border {
+            color: current().border,
+            width: 1.0,
+            radius: 2.0.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
+/// Accent-filled primary action button (Save / OK / Connect).
+pub fn primary_button(status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => accent_hover(),
+        _ => current().accent,
+    };
+    button::Style {
+        background: Some(Background::Color(background)),
+        text_color: Color::WHITE,
+        border: Border {
+            color: background,
+            width: 1.0,
+            radius: 2.0.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
+/// Disabled counterpart to [`primary_button`].
+pub fn disabled_button() -> button::Style {
+    button::Style {
+        background: Some(Background::Color(current().chrome_bg)),
+        text_color: current().muted,
+        border: Border {
+            color: current().border,
+            width: 1.0,
+            radius: 2.0.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
+/// Borderless accent-text link (e.g. "download Instant Client").
+pub fn link_button(status: button::Status) -> button::Style {
+    let text_color = match status {
+        button::Status::Hovered | button::Status::Pressed => accent_hover(),
+        _ => current().accent,
+    };
+    button::Style {
+        background: None,
+        text_color,
+        border: Border::default(),
+        ..button::Style::default()
+    }
+}
+
+/// Card style shared by every modal dialog.
+pub fn modal_card() -> container::Style {
+    container::Style {
+        background: Some(Background::Color(current().ribbon_bg)),
+        border: Border {
+            color: current().border,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        text_color: Some(current().text),
+        ..container::Style::default()
+    }
+}
+
+/// Dim layer behind modal dialogs (uniform alpha everywhere).
+pub fn modal_backdrop() -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.5))),
+        ..container::Style::default()
+    }
+}
+
+/// Tooltip body: opaque so the hint stays readable over any content.
+pub fn tooltip_style() -> container::Style {
+    container::Style {
+        background: Some(Background::Color(current().chrome_bg)),
+        border: Border {
+            color: current().border,
+            width: 1.0,
+            radius: 2.0.into(),
+        },
+        text_color: Some(current().text),
+        ..container::Style::default()
+    }
 }
 
 fn system_prefers_dark() -> bool {

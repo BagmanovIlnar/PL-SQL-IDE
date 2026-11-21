@@ -10,7 +10,7 @@ use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key, Modifiers};
 use iced::mouse;
 use iced::widget::operation::focus as focus_widget;
-use iced::widget::text_editor::{Action, Binding, Content, Edit};
+use iced::widget::text_editor::{Action, Binding, Content, Edit, Motion};
 use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, row, rule, scrollable,
     stack, text, text_editor, text_input, tooltip, Space,
@@ -18,7 +18,9 @@ use iced::widget::{
 use iced::{
     Background, Color, Element, Event, Fill, Font, Padding, Point, Subscription, Task, Theme,
 };
-use iced_fonts::lucide::{database, pencil, plug, plus, trash};
+use iced_fonts::lucide::{
+    chevron_down, chevron_right, database, folder_plus, pencil, play, plug, plus, square, trash,
+};
 use iced_fonts::LUCIDE_FONT_BYTES;
 
 /// Stable widget id so the editor can keep / regain keyboard focus while the
@@ -52,13 +54,14 @@ use iced_aw::menu::{DrawPath, Item, Menu, MenuBar};
 use iced_aw::style::menu_bar as menu_bar_style;
 
 use crate::core::connections_store::{self, ConnectionsStore};
+use crate::core::data_changes;
 use crate::core::debug_session::{Breakpoint, DebugCommand, DebugSession};
 use crate::core::object_metadata::{list_objects, list_owners, ObjectKind, ObjectOwnerList};
 use crate::core::oracle_debug::{self, DebugEngineEvent, DebugEngineRequest};
 use crate::core::oracle_debugger_prefs::{self, DebugSystem};
 use crate::core::oracle_pool;
 use crate::core::postgres_spike::{run_postgres_spike, PostgresSpikeRequest};
-use crate::core::{ConnectionId, ConnectionProfile, DbKind};
+use crate::core::{ConnectAs, ConnectionId, ConnectionProfile, DbKind};
 use crate::ui::completion::{suggest_keywords, word_prefix_at};
 use crate::ui::debug_toolbar::{debug_toolbar, DebugToolbarMessage};
 use crate::ui::i18n;
@@ -67,6 +70,7 @@ use crate::ui::parameters::{
     PANEL_HEIGHT, PANEL_HEIGHT_MAX, PANEL_HEIGHT_MIN,
 };
 use crate::ui::preferences::{preferences_modal, PreferencesMessage, PreferencesState};
+use crate::ui::result_grid::{self, QueryResult, ResultMessage};
 use crate::ui::theme::{self as ui_theme, ThemeMode};
 use crate::ui::window_kind::WindowKind;
 
@@ -120,6 +124,21 @@ struct ResizeDrag {
     last: Option<Point>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BottomTab {
+    Parameters,
+    Result,
+}
+
+/// Structured outcome of a spike run: text for output plus grid data.
+#[derive(Debug, Clone)]
+struct SpikePayload {
+    sql: String,
+    output: String,
+    columns: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
 #[derive(Debug)]
 struct Worksheet {
     kind: WindowKind,
@@ -128,6 +147,8 @@ struct Worksheet {
     scroll_y: f32,
     /// Bind / test parameters (SQL Window and Test Window).
     parameters: ParametersPanel,
+    /// Result grid of the last executed query (SQL Window).
+    result: QueryResult,
     /// Connection selected in Connections when this worksheet was created.
     connection_id: Option<ConnectionId>,
     /// Source breakpoints (1-based line numbers).
@@ -183,6 +204,8 @@ enum ConnectionStatus {
 struct ConnectionDraft {
     id: Option<ConnectionId>,
     name: String,
+    group: String,
+    connect_as: ConnectAs,
     db_kind: DbKind,
     host: String,
     port: String,
@@ -191,17 +214,36 @@ struct ConnectionDraft {
     password: String,
 }
 
+/// Sidebar group entry in the connection dialog pick list;
+/// empty name renders localized "No group".
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupOption(String);
+
+impl std::fmt::Display for GroupOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            write!(f, "{}", i18n::t("dialog.connection.group_none"))
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
+
 impl ConnectionDraft {
-    fn from_new() -> Self {
+    fn from_new(group: &str) -> Self {
         let profile =
             ConnectionProfile::new(i18n::t("dialog.connection.default_name"), DbKind::Postgres);
-        Self::from_profile(&profile, true)
+        let mut draft = Self::from_profile(&profile, true);
+        draft.group = group.to_string();
+        draft
     }
 
     fn from_profile(profile: &ConnectionProfile, is_new: bool) -> Self {
         Self {
             id: if is_new { None } else { Some(profile.id) },
             name: profile.name.clone(),
+            group: profile.group.clone(),
+            connect_as: profile.connect_as,
             db_kind: profile.db_kind,
             host: profile.host.clone(),
             port: profile.port.to_string(),
@@ -226,6 +268,8 @@ impl ConnectionDraft {
         let mut profile = ConnectionProfile {
             id: self.id.unwrap_or_else(uuid::Uuid::new_v4),
             name: self.name.trim().to_string(),
+            group: self.group.trim().to_string(),
+            connect_as: self.connect_as,
             db_kind: self.db_kind,
             host: self.host.trim().to_string(),
             port,
@@ -319,16 +363,36 @@ struct App {
     connection_status: HashMap<ConnectionId, ConnectionStatus>,
     /// Error text for the Connect failure modal (shown when set).
     connect_error: Option<String>,
+    /// SQL execution error shown in a modal (with caret jump on close).
+    error_modal: Option<String>,
     dialog: Option<ConnectionDraft>,
     dialog_error: Option<String>,
+    /// Sidebar group names in display order (persisted in connections.json).
+    groups: Vec<String>,
+    /// Some(draft) = the "new group" dialog is open with that name draft.
+    group_draft: Option<GroupDraft>,
+    /// Groups whose rows are hidden; absent = expanded (default).
+    collapsed_groups: HashSet<String>,
+    /// Highlighted group header in the sidebar (Delete acts on it).
+    selected_group: Option<String>,
     /// Open Preferences dialog (`None` when closed).
     preferences: Option<PreferencesState>,
     /// Open Value ellipsis editor for a parameter row.
     value_editor: Option<ValueEditorDraft>,
+    /// Open "…" value editor for a result-grid cell.
+    cell_editor: Option<result_grid::CellEditorDraft>,
+    /// Active result-grid column resize drag.
+    column_drag: Option<result_grid::ColumnDrag>,
+    /// Mode of the in-flight spike run (execute / fetch next / fetch all).
+    fetch_mode: FetchMode,
     completion: Vec<String>,
     completion_prefix: String,
     selected_completion: usize,
     busy: bool,
+    /// Monotonic id of the running spike; Stop bumps it so late results are dropped.
+    spike_run: u64,
+    /// Active tab of the bottom panel (Parameters / Results).
+    bottom_tab: BottomTab,
     metrics: String,
     last_output: String,
     selected_node: Option<BrowserNode>,
@@ -382,6 +446,7 @@ enum Message {
         result: Result<Vec<String>, String>,
         connection_id: ConnectionId,
     },
+    DismissErrorModal,
     SelectTab(usize),
     CloseTab(usize),
     /// Save the pending tab, then close it.
@@ -399,17 +464,31 @@ enum Message {
     MenuSaveAsStub,
     MenuExit,
     MenuExecute,
+    /// Cancel waiting for the running SQL/Command execution.
+    MenuStop,
     SelectConnection(ConnectionId),
+    SelectGroup(String),
+    DeleteGroup,
     AddConnection,
     EditConnection,
     DeleteConnection,
+    /// Open the "new sidebar group" dialog.
+    AddGroup,
+    EditGroup,
+    GroupDraftChanged(String),
+    GroupDialogSave,
+    GroupDialogCancel,
     /// Attempt to open a live session for the selected Connections profile.
     ConnectSelected,
     /// Async result of a Connect attempt for `ConnectionId`.
     ConnectFinished(ConnectionId, Result<(), String>),
+    /// Persistent Oracle session opened in background after Connect.
+    PoolOpened(ConnectionId, Result<(), String>),
     /// Close the Connect error modal.
     DismissConnectError,
     DialogNameChanged(String),
+    DialogGroupChanged(String),
+    DialogConnectAsChanged(ConnectAs),
     DialogDbKindChanged(DbKind),
     DialogHostChanged(String),
     DialogPortChanged(String),
@@ -431,7 +510,13 @@ enum Message {
     CompletionNavigate(i32),
     /// Close the completion popup without inserting (Escape).
     DismissCompletion,
-    SpikeFinished(Result<String, String>),
+    SpikeFinished(u64, Result<SpikePayload, String>),
+    /// Generated UPDATE/INSERT/DELETE batch from the result grid finished.
+    PostFinished(u64, Result<String, String>),
+    /// Switch the bottom panel between Parameters and Results.
+    BottomTab(BottomTab),
+    /// Result-grid interactions (edit mode, cell edits, fetch, post).
+    Grid(ResultMessage),
     /// Begin dragging a panel resize border.
     ResizeStart(ResizeTarget),
     /// Cursor moved while a panel resize drag is active (window coordinates).
@@ -462,17 +547,27 @@ impl App {
             ribbon_hover: None,
             theme_mode: ThemeMode::System,
             connections: stored.connections,
+            groups: stored.groups,
+            group_draft: None,
+            collapsed_groups: HashSet::new(),
+            selected_group: None,
             selected_connection,
             connection_status: HashMap::new(),
             connect_error: None,
+            error_modal: None,
             dialog: None,
             dialog_error: None,
             preferences: None,
             value_editor: None,
+            cell_editor: None,
+            column_drag: None,
+            fetch_mode: FetchMode::Execute,
             completion: Vec::new(),
             completion_prefix: String::new(),
             selected_completion: 0,
             busy: false,
+            spike_run: 0,
+            bottom_tab: BottomTab::Parameters,
             metrics: i18n::t("status.ready"),
             last_output: String::new(),
             selected_node: None,
@@ -499,6 +594,7 @@ impl App {
         connections_store::save(&ConnectionsStore {
             connections: self.connections.clone(),
             selected: self.selected_connection,
+            groups: self.groups.clone(),
         });
     }
 
@@ -551,6 +647,7 @@ impl App {
             content: Content::with_text(kind.template()),
             scroll_y: 0.0,
             parameters: ParametersPanel::default(),
+            result: QueryResult::default(),
             connection_id,
             breakpoints: HashSet::new(),
             file_path: None,
@@ -571,11 +668,25 @@ impl App {
     }
 
     /// Removes a worksheet tab and fixes `active_tab` (may leave the workspace empty).
-    fn remove_worksheet(&mut self, index: usize) {
+    fn remove_worksheet(&mut self, index: usize) -> Task<Message> {
         if index >= self.worksheets.len() {
-            return;
+            return Task::none();
         }
+        let owner = self.debug_session.tab;
         self.worksheets.remove(index);
+        // Closing the owning window ends its debug session (the block runs on
+        // a pooled session; leaving it would keep the debugger active
+        // invisibly). Other tabs closing must not touch the session.
+        let stop_task = if self.debug_session.active && owner == Some(index) {
+            self.apply_debug_command(DebugCommand::Stop)
+        } else {
+            Task::none()
+        };
+        match self.debug_session.tab {
+            Some(t) if t == index => self.debug_session.tab = None,
+            Some(t) if t > index => self.debug_session.tab = Some(t - 1),
+            _ => {}
+        }
         if self.worksheets.is_empty() {
             self.active_tab = 0;
         } else if self.active_tab >= self.worksheets.len() {
@@ -586,6 +697,7 @@ impl App {
         self.completion.clear();
         self.value_editor = None;
         self.close_confirm = None;
+        stop_task
     }
 
     /// Persist worksheet `index` to disk. Uses Save As when `force_save_as` or no path yet.
@@ -673,6 +785,17 @@ impl App {
     }
 
     fn apply_debug_command(&mut self, command: DebugCommand) -> Task<Message> {
+        tracing::info!("debug: toolbar command {command:?}");
+        if matches!(command, DebugCommand::Start(_)) {
+            self.debug_session.tab = Some(self.active_tab);
+        } else if self.debug_session.active
+            && !matches!(command, DebugCommand::Stop)
+            && self.debug_session.tab != Some(self.active_tab)
+        {
+            self.metrics = i18n::t("debug.other_tab");
+            self.last_output = i18n::t("debug.other_tab");
+            return Task::none();
+        }
         self.sync_session_breakpoints_from_sheet();
         if let Some(sheet) = self.worksheets.get(self.active_tab) {
             let line = ((sheet.scroll_y / EDITOR_LINE_HEIGHT).floor() as usize) + 1;
@@ -879,7 +1002,29 @@ impl App {
         let Some(prefix) = word_prefix_at(&line.text, cursor.line, cursor.column) else {
             return;
         };
-        self.completion = suggest_keywords(&prefix, 8);
+        // DB object names (tables/views/procs/...) first, then SQL keywords.
+        let needle = prefix.to_ascii_uppercase();
+        let mut items: Vec<String> = Vec::new();
+        for names in self.object_cache.values() {
+            for name in names {
+                if name.to_ascii_uppercase().starts_with(&needle)
+                    && needle.len() < name.len()
+                    && !items.iter().any(|item| item == name)
+                {
+                    items.push(name.clone());
+                }
+            }
+        }
+        for keyword in suggest_keywords(&prefix, 8) {
+            if !items.iter().any(|item| item == &keyword) {
+                items.push(keyword);
+            }
+        }
+        items.truncate(8);
+        if items.is_empty() {
+            return;
+        }
+        self.completion = items;
         self.completion_prefix = prefix;
         // Always highlight the first suggestion when the list appears / changes.
         self.selected_completion = 0;
@@ -1027,6 +1172,17 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                             ("name", list.current_user.as_str()),
                         ],
                     );
+                    // Warm the completion dictionary with the current
+                    // user's objects (all kinds) in the background.
+                    let mut tasks = Vec::new();
+                    if let Some(owner) = app.object_owners.first().cloned() {
+                        if let Some(profile) = app.selected_profile() {
+                            for kind in ObjectKind::for_db(profile.db_kind) {
+                                tasks.push(start_load_object_folder(app, owner.clone(), *kind));
+                            }
+                        }
+                    }
+                    return Task::batch(tasks);
                 }
                 Err(error) => {
                     app.object_owners.clear();
@@ -1091,22 +1247,21 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.close_confirm = Some(index);
                 return Task::none();
             }
-            app.remove_worksheet(index);
-            Task::none()
+            app.remove_worksheet(index)
         }
         Message::CloseTabSave => {
             let Some(index) = app.close_confirm else {
                 return Task::none();
             };
             match app.save_worksheet_at(index, false) {
-                SaveOutcome::Saved => app.remove_worksheet(index),
+                SaveOutcome::Saved => return app.remove_worksheet(index),
                 SaveOutcome::Cancelled | SaveOutcome::Failed => {}
             }
             Task::none()
         }
         Message::CloseTabDiscard => {
             if let Some(index) = app.close_confirm.take() {
-                app.remove_worksheet(index);
+                return app.remove_worksheet(index);
             }
             Task::none()
         }
@@ -1131,9 +1286,28 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::MenuExit => iced::exit(),
-        Message::MenuExecute => run_spike(app),
+        Message::MenuExecute => {
+            tracing::info!("execute requested");
+            run_spike(app, FetchMode::Execute)
+        }
+        Message::MenuStop => {
+            if app.debug_session.active {
+                return app.apply_debug_command(DebugCommand::Stop);
+            }
+            if !app.busy {
+                return Task::none();
+            }
+            // ponytail: cancels the UI wait only; server-side kill needs a
+            // cancellation token threaded through the spike runs.
+            app.busy = false;
+            app.spike_run += 1;
+            app.last_output = i18n::t("status.cancelled");
+            app.metrics = i18n::t("status.cancelled");
+            Task::none()
+        }
         Message::SelectConnection(id) => {
             app.selected_connection = Some(id);
+            app.selected_group = None;
             app.persist_connections();
             if let Some(profile) = app.selected_profile() {
                 app.metrics = i18n::t_args(
@@ -1149,8 +1323,92 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::AddConnection => {
-            app.dialog = Some(ConnectionDraft::from_new());
+            let group = app.selected_group.clone().unwrap_or_default();
+            app.dialog = Some(ConnectionDraft::from_new(&group));
             app.dialog_error = None;
+            Task::none()
+        }
+        Message::AddGroup => {
+            app.group_draft = Some(GroupDraft {
+                original: None,
+                name: String::new(),
+            });
+            Task::none()
+        }
+        Message::EditGroup => {
+            if let Some(name) = app.selected_group.clone() {
+                app.group_draft = Some(GroupDraft {
+                    original: Some(name.clone()),
+                    name,
+                });
+            }
+            Task::none()
+        }
+        Message::GroupDraftChanged(value) => {
+            if let Some(draft) = &mut app.group_draft {
+                draft.name = value;
+            }
+            Task::none()
+        }
+        Message::GroupDialogSave => {
+            if let Some(draft) = app.group_draft.take() {
+                let name = draft.name.trim().to_string();
+                match draft.original {
+                    None => {
+                        if !name.is_empty() && !app.groups.contains(&name) {
+                            app.groups.push(name);
+                            app.persist_connections();
+                        }
+                    }
+                    Some(old) => {
+                        if !name.is_empty() && (name == old || !app.groups.contains(&name)) {
+                            if let Some(slot) = app.groups.iter_mut().find(|g| **g == old) {
+                                *slot = name.clone();
+                            }
+                            for profile in &mut app.connections {
+                                if profile.group == old {
+                                    profile.group = name.clone();
+                                }
+                            }
+                            if app.collapsed_groups.remove(&old) {
+                                app.collapsed_groups.insert(name.clone());
+                            }
+                            app.selected_group = Some(name);
+                            app.persist_connections();
+                        }
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::GroupDialogCancel => {
+            app.group_draft = None;
+            Task::none()
+        }
+        Message::SelectGroup(name) => {
+            if app.selected_group.as_deref() == Some(name.as_str()) {
+                app.selected_group = None;
+            } else {
+                app.selected_group = Some(name.clone());
+                app.selected_connection = None;
+            }
+            if !app.collapsed_groups.remove(&name) {
+                app.collapsed_groups.insert(name);
+            }
+            Task::none()
+        }
+        Message::DeleteGroup => {
+            if let Some(name) = app.selected_group.take() {
+                app.groups.retain(|group| *group != name);
+                for profile in &mut app.connections {
+                    if profile.group == name {
+                        profile.group.clear();
+                    }
+                }
+                app.collapsed_groups.remove(&name);
+                app.persist_connections();
+                app.metrics = i18n::t_args("status.group_deleted", &[("name", name.as_str())]);
+            }
             Task::none()
         }
         Message::EditConnection => {
@@ -1189,6 +1447,13 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::ConnectSelected => run_connect(app),
+        Message::PoolOpened(id, result) => {
+            if let Err(err) = result {
+                app.last_output = format!("Connected, but persistent Oracle session failed: {err}");
+            }
+            let _ = id;
+            Task::none()
+        }
         Message::ConnectFinished(id, result) => {
             app.busy = false;
             match result {
@@ -1196,15 +1461,24 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.connection_status
                         .insert(id, ConnectionStatus::Connected);
                     app.connect_error = None;
+                    let mut tasks: Vec<Task<Message>> = Vec::new();
                     if let Some(profile) =
                         app.connections.iter().find(|item| item.id == id).cloned()
                     {
                         if profile.db_kind == DbKind::Oracle {
-                            if let Err(err) = oracle_pool::open_target(&profile) {
-                                app.last_output = format!(
-                                    "Connected, but persistent Oracle session failed: {err}"
-                                );
-                            }
+                            // Blocking OCI connect: keep it off the UI thread.
+                            tasks.push(Task::perform(
+                                async move {
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        oracle_pool::open_target(&profile)
+                                    })
+                                    .await
+                                    .map_err(|err| err.to_string())
+                                    .and_then(|r| r.map_err(|err| err.to_string()));
+                                    Message::PoolOpened(id, result)
+                                },
+                                |message| message,
+                            ));
                         }
                     }
                     let name = app
@@ -1215,10 +1489,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                         .unwrap_or_else(|| "connection".into());
                     app.metrics = i18n::t_args("status.connected", &[("name", name.as_str())]);
                     if app.selected_connection == Some(id) {
-                        start_load_object_roots(app)
-                    } else {
-                        Task::none()
+                        tasks.push(start_load_object_roots(app));
                     }
+                    Task::batch(tasks)
                 }
                 Err(error) => {
                     app.connection_status.insert(id, ConnectionStatus::Failed);
@@ -1231,6 +1504,29 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
         }
+        Message::DismissErrorModal => {
+            let error = app.error_modal.take().unwrap_or_default();
+            // ponytail: self-check runs on the text as it is NOW; if the user
+            // edited after the failed run, the hint may point one edit off.
+            let sql_text = app
+                .active_content()
+                .map(|content| content.text())
+                .unwrap_or_default();
+            let position = parse_error_position(&error).or_else(|| self_check_position(&sql_text));
+            if let Some((line, col)) = position {
+                if let Some(content) = app.active_content_mut() {
+                    content.perform(Action::Select(Motion::DocumentStart));
+                    for _ in 0..line.saturating_sub(1) {
+                        content.perform(Action::Move(Motion::Down));
+                    }
+                    content.perform(Action::Move(Motion::Home));
+                    for _ in 0..col.saturating_sub(1) {
+                        content.perform(Action::Move(Motion::Right));
+                    }
+                }
+            }
+            Task::none()
+        }
         Message::DismissConnectError => {
             app.connect_error = None;
             Task::none()
@@ -1238,6 +1534,18 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::DialogNameChanged(value) => {
             if let Some(dialog) = &mut app.dialog {
                 dialog.name = value;
+            }
+            Task::none()
+        }
+        Message::DialogGroupChanged(value) => {
+            if let Some(dialog) = &mut app.dialog {
+                dialog.group = value;
+            }
+            Task::none()
+        }
+        Message::DialogConnectAsChanged(value) => {
+            if let Some(dialog) = &mut app.dialog {
+                dialog.connect_as = value;
             }
             Task::none()
         }
@@ -1352,20 +1660,81 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.selected_completion = 0;
             focus_widget(EDITOR_ID)
         }
-        Message::SpikeFinished(result) => {
+        Message::SpikeFinished(run_id, outcome) => {
+            tracing::info!(run_id, current = app.spike_run, "spike finished");
+            if run_id != app.spike_run {
+                return Task::none(); // stale result of a cancelled run
+            }
             app.busy = false;
-            match result {
-                Ok(output) => {
-                    app.last_output = output;
+            match outcome {
+                Ok(payload) => {
+                    tracing::info!(
+                        cols = payload.columns.len(),
+                        rows = payload.rows.len(),
+                        "grid updated"
+                    );
+                    app.last_output = payload.output;
                     app.metrics = i18n::t("status.execute_completed");
+                    let mode = app.fetch_mode;
+                    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                        match mode {
+                            FetchMode::Execute => {
+                                if !payload.columns.is_empty() {
+                                    sheet.result = QueryResult {
+                                        source_sql: payload.sql,
+                                        columns: payload.columns,
+                                        rows: payload.rows,
+                                        ..QueryResult::default()
+                                    };
+                                    if sheet.kind == WindowKind::Sql {
+                                        app.bottom_tab = BottomTab::Result;
+                                    }
+                                }
+                            }
+                            // Paging continues into the same buffer.
+                            FetchMode::Next | FetchMode::All => {
+                                sheet.result.rows.extend(payload.rows);
+                            }
+                        }
+                    }
                 }
                 Err(error) => {
-                    app.last_output = error;
+                    app.last_output = error.clone();
+                    app.error_modal = Some(error);
                     app.metrics = i18n::t("status.execute_failed");
                 }
             }
             Task::none()
         }
+        Message::PostFinished(run_id, outcome) => {
+            if run_id != app.spike_run {
+                return Task::none(); // stale result of a cancelled run
+            }
+            app.busy = false;
+            match outcome {
+                Ok(output) => {
+                    app.last_output = output;
+                    app.metrics = i18n::t("status.post_ok");
+                    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                        sheet.result.edits.clear();
+                        sheet.result.inserted.clear();
+                        sheet.result.deleted.clear();
+                        sheet.result.edit_mode = false;
+                    }
+                }
+                Err(error) => {
+                    app.last_output = error.clone();
+                    app.error_modal = Some(error);
+                    app.metrics = i18n::t("status.execute_failed");
+                }
+            }
+            Task::none()
+        }
+        Message::BottomTab(tab) => {
+            app.bottom_tab = tab;
+            Task::none()
+        }
+        Message::Grid(message) => handle_grid_message(app, message),
         Message::ResizeStart(target) => {
             app.resize_drag = Some(ResizeDrag { target, last: None });
             Task::none()
@@ -1418,6 +1787,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             DebugToolbarMessage::RunToNextException => {
                 app.apply_debug_command(DebugCommand::RunToNextException)
             }
+            DebugToolbarMessage::Stop => app.apply_debug_command(DebugCommand::Stop),
             DebugToolbarMessage::ExecuteSqlInDebugSession => {
                 app.apply_debug_command(DebugCommand::ExecuteSqlInDebugSession)
             }
@@ -1426,11 +1796,24 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.busy = false;
             match result {
                 Ok(event) => {
-                    app.debug_session.active = event.active;
+                    tracing::info!(
+                        "debug: engine event active={} line={:?} status={}",
+                        event.active,
+                        event.current_line,
+                        event.status
+                    );
+                    // The block ended (finished or failed) — the session is
+                    // over, so toolbar buttons grey out until the next Start.
+                    let over = event.status.starts_with("program finished")
+                        || event.status.starts_with("block failed");
+                    app.debug_session.active = event.active && !over;
                     app.debug_session.system = event.system;
                     app.debug_session.status = event.status.clone();
                     app.debug_session.current_line = event.current_line;
-                    app.metrics = event.status;
+                    app.metrics = event.status.clone();
+                    if event.status.starts_with("block failed") {
+                        app.error_modal = Some(event.message.clone());
+                    }
                     let mut out = event.message;
                     if !event.log.is_empty() {
                         out.push('\n');
@@ -1444,7 +1827,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
                 Err(err) => {
                     app.metrics = i18n::t("debug.failed");
-                    app.last_output = err;
+                    app.last_output = err.clone();
+                    app.error_modal = Some(err);
                 }
             }
             Task::none()
@@ -1501,6 +1885,7 @@ fn run_connect(app: &mut App) -> Task<Message> {
                 sql: Some("select 1::int as value".into()),
                 timeout_ms: Some(10_000),
                 cancel: false,
+                max_rows: Some(10),
             };
             Task::perform(
                 async move {
@@ -1520,9 +1905,11 @@ fn run_connect(app: &mut App) -> Task<Message> {
                     connect_descriptor: profile.oracle_connect_descriptor(),
                     username: profile.username,
                     password: profile.password,
+                    connect_as: profile.connect_as,
                     sql: Some("select 1 as value from dual".into()),
                     timeout_ms: Some(10_000),
                     cancel: false,
+                    max_rows: Some(10),
                 };
                 Task::perform(
                     async move {
@@ -1615,7 +2002,78 @@ fn start_load_object_folder(app: &mut App, owner: String, kind: ObjectKind) -> T
     )
 }
 
-fn run_spike(app: &mut App) -> Task<Message> {
+/// Skips leading whitespace and single/multi-line comments before the first keyword.
+fn strip_leading_comments(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = match after.split_once('\n') {
+                Some((_, tail)) => tail.trim_start(),
+                None => "",
+            };
+        } else if rest.strip_prefix("/*").is_some() {
+            rest = match rest[2..].find("*/") {
+                Some(end) => rest[2 + end + 2..].trim_start(),
+                None => "",
+            };
+        } else {
+            return rest;
+        }
+    }
+}
+
+/// What a spike run does with the result grid buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum FetchMode {
+    /// Fresh execution — replaces the buffer with the first page.
+    #[default]
+    Execute,
+    /// Append the next page to the grid.
+    Next,
+    /// Append all remaining rows.
+    All,
+}
+
+/// Helper column added by the Oracle ROWNUM paging wrapper; stripped after fetch.
+const PAGE_HELPER_COLUMN: &str = "_PLSQLIDE_RN";
+
+/// Wraps a top-level SELECT for server-side paging: skip `offset` rows,
+/// fetch `limit` rows (or everything when `None`). DML and multi-statement
+/// text pass through untouched. Oracle uses the ROWNUM trick (pre-12c safe);
+/// Postgres uses OFFSET/FETCH.
+fn page_select(sql: &str, kind: DbKind, offset: usize, limit: Option<usize>) -> String {
+    let trimmed = strip_leading_comments(sql).trim_end_matches(';').trim();
+    let upper = trimmed.to_ascii_uppercase();
+    if !upper.starts_with("SELECT") || trimmed.contains(';') || upper.contains("FOR UPDATE") {
+        return sql.to_string();
+    }
+    match kind {
+        DbKind::Postgres => {
+            let mut wrapped = format!("SELECT * FROM ({trimmed}) OFFSET {offset} ROWS");
+            if let Some(cap) = limit {
+                wrapped.push_str(&format!(" FETCH FIRST {cap} ROWS ONLY"));
+            }
+            wrapped
+        }
+        DbKind::Oracle => match (offset, limit) {
+            // First page without a helper column; `ROWNUM` bounds the fetch.
+            (0, None) => trimmed.to_string(),
+            (0, Some(cap)) => format!("SELECT * FROM ({trimmed}) WHERE ROWNUM <= {cap}"),
+            (offset, limit) => {
+                let end = match limit {
+                    Some(cap) => offset + cap,
+                    None => 1_000_000_000,
+                };
+                format!(
+                    "SELECT * FROM (SELECT t.*, ROWNUM AS \"{PAGE_HELPER_COLUMN}\" FROM ({trimmed}) t \
+                     WHERE ROWNUM <= {end}) WHERE \"{PAGE_HELPER_COLUMN}\" > {offset}"
+                )
+            }
+        },
+    }
+}
+
+fn run_spike(app: &mut App, mode: FetchMode) -> Task<Message> {
     if app.busy {
         return Task::none();
     }
@@ -1625,10 +2083,27 @@ fn run_spike(app: &mut App) -> Task<Message> {
     };
 
     app.busy = true;
+    app.spike_run += 1;
+    let run_id = app.spike_run;
     app.metrics = i18n::t_args("status.executing", &[("name", profile.name.as_str())]);
     app.last_output = i18n::t("status.running");
 
     let sql = app.active_content().map(|content| content.text());
+    let sql_text = sql.clone().unwrap_or_default();
+    // Server-side paging: first run loads the first page, fetch-next/all
+    // continue from the rows already in the grid buffer.
+    let offset = app
+        .worksheets
+        .get(app.active_tab)
+        .map(|sheet| sheet.result.rows.len())
+        .unwrap_or(0);
+    let sql = sql.map(|text| match mode {
+        FetchMode::Execute => page_select(&text, profile.db_kind, 0, Some(result_grid::PAGE)),
+        FetchMode::Next => page_select(&text, profile.db_kind, offset, Some(result_grid::PAGE)),
+        FetchMode::All => page_select(&text, profile.db_kind, offset, None),
+    });
+    tracing::info!(sql = sql.as_deref().unwrap_or(""), "paging sql prepared");
+    app.fetch_mode = mode;
 
     match profile.db_kind {
         DbKind::Postgres => {
@@ -1637,15 +2112,24 @@ fn run_spike(app: &mut App) -> Task<Message> {
                 sql,
                 timeout_ms: Some(10_000),
                 cancel: false,
+                max_rows: None,
             };
             Task::perform(
                 async move {
                     run_postgres_spike(request)
                         .await
-                        .map(|result| result.format_for_ui())
+                        .map(|result| {
+                            let output = result.format_for_ui();
+                            SpikePayload {
+                                sql: sql_text,
+                                output,
+                                columns: result.columns,
+                                rows: result.rows,
+                            }
+                        })
                         .map_err(|err| err.to_string())
                 },
-                Message::SpikeFinished,
+                move |result| Message::SpikeFinished(run_id, result),
             )
         }
         DbKind::Oracle => {
@@ -1656,9 +2140,234 @@ fn run_spike(app: &mut App) -> Task<Message> {
                     connect_descriptor: profile.oracle_connect_descriptor(),
                     username: profile.username,
                     password: profile.password,
+                    connect_as: profile.connect_as,
                     sql,
                     timeout_ms: Some(10_000),
                     cancel: false,
+                    max_rows: None,
+                };
+                Task::perform(
+                    async move {
+                        run_oracle_spike(request)
+                            .await
+                            .map(|result| {
+                                let output = result.format_for_ui();
+                                SpikePayload {
+                                    sql: sql_text,
+                                    output,
+                                    columns: result.columns,
+                                    rows: result.rows,
+                                }
+                            })
+                            .map_err(|err| err.to_string())
+                    },
+                    move |result| Message::SpikeFinished(run_id, result),
+                )
+            }
+            #[cfg(not(feature = "oracle"))]
+            {
+                app.busy = false;
+                app.last_output = i18n::t("status.oracle_disabled");
+                app.metrics = i18n::t("status.execute_failed");
+                Task::none()
+            }
+        }
+    }
+}
+
+/// Result-grid interactions: pure state changes, Post runs the DML batch.
+fn handle_grid_message(app: &mut App, message: ResultMessage) -> Task<Message> {
+    // Cell value modal and pure grid state first; Post needs &mut App freely.
+    if let ResultMessage::OpenCellEditor(row, col) = message {
+        if let Some(sheet) = app.worksheets.get(app.active_tab) {
+            let value = sheet.result.cell(row, col).to_string();
+            app.cell_editor = Some(result_grid::CellEditorDraft::open(row, col, &value));
+        }
+        return Task::none();
+    }
+    if let ResultMessage::CellEditorAction(action) = message {
+        if let Some(draft) = &mut app.cell_editor {
+            draft.perform_editor(action);
+        }
+        return Task::none();
+    }
+    if let ResultMessage::CellEditorOk = message {
+        if let Some(draft) = app.cell_editor.take() {
+            if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                sheet
+                    .result
+                    .edits
+                    .insert((draft.row, draft.col), draft.content.text());
+            }
+        }
+        return Task::none();
+    }
+    if let ResultMessage::CellEditorCancel = message {
+        app.cell_editor = None;
+        return Task::none();
+    }
+    if let ResultMessage::ResizeStart(col) = message {
+        if let Some(sheet) = app.worksheets.get(app.active_tab) {
+            app.column_drag = Some(result_grid::ColumnDrag {
+                col,
+                start_w: sheet.result.col_width(col),
+                anchor_x: None,
+            });
+        }
+        return Task::none();
+    }
+    if let ResultMessage::ResizeMove(x) = message {
+        let drag = match &mut app.column_drag {
+            Some(drag) => drag,
+            None => return Task::none(),
+        };
+        match drag.anchor_x {
+            None => drag.anchor_x = Some(x),
+            Some(ax) => {
+                let width = (drag.start_w + (x - ax)).max(60.0);
+                if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                    sheet.result.ensure_col_widths();
+                    if let Some(slot) = sheet.result.col_widths.get_mut(drag.col) {
+                        *slot = width;
+                    }
+                }
+            }
+        }
+        return Task::none();
+    }
+    if let ResultMessage::ResizeEnd = message {
+        app.column_drag = None;
+        return Task::none();
+    }
+    if let ResultMessage::ContentScrolled(viewport) = message {
+        return result_grid::handle_content_scrolled(viewport).map(Message::Grid);
+    }
+    if let ResultMessage::Post = message {
+        return run_result_post(app);
+    }
+    if let ResultMessage::FetchNext = message {
+        return run_spike(app, FetchMode::Next);
+    }
+    if let ResultMessage::FetchLast = message {
+        return run_spike(app, FetchMode::All);
+    }
+    let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
+        return Task::none();
+    };
+    let result = &mut sheet.result;
+    match message {
+        ResultMessage::ToggleEdit => result.edit_mode = !result.edit_mode,
+        ResultMessage::Select(index) => result.selected = Some(index),
+        ResultMessage::Cell(index, col, value) => {
+            result.edits.insert((index, col), value);
+        }
+        ResultMessage::Insert => {
+            let index = result.rows.len();
+            result.rows.push(vec![String::new(); result.columns.len()]);
+            result.inserted.insert(index);
+            result.selected = Some(index);
+            result.edit_mode = true;
+        }
+        ResultMessage::Delete => {
+            if let Some(index) = result.selected {
+                result.deleted.insert(index);
+            }
+        }
+        ResultMessage::Post | ResultMessage::FetchNext | ResultMessage::FetchLast => {
+            unreachable!("handled above")
+        }
+        ResultMessage::OpenCellEditor(..)
+        | ResultMessage::CellEditorAction(..)
+        | ResultMessage::CellEditorOk
+        | ResultMessage::CellEditorCancel
+        | ResultMessage::ResizeStart(..)
+        | ResultMessage::ResizeMove(..)
+        | ResultMessage::ResizeEnd
+        | ResultMessage::ContentScrolled(..) => unreachable!("handled above"),
+    }
+    Task::none()
+}
+
+/// Posts the result-grid changes: generates DML and runs it on the same connection.
+fn run_result_post(app: &mut App) -> Task<Message> {
+    if app.busy {
+        return Task::none();
+    }
+    let Some(profile) = app.active_worksheet_profile().cloned() else {
+        app.metrics = i18n::t("status.no_worksheet_connection");
+        return Task::none();
+    };
+    let Some(sheet) = app.worksheets.get(app.active_tab) else {
+        return Task::none();
+    };
+    let result = &sheet.result;
+    if !result.has_changes() {
+        app.last_output = i18n::t("result.no_changes");
+        return Task::none();
+    }
+    let Some(table) = data_changes::extract_table(&result.source_sql) else {
+        app.last_output = i18n::t("result.no_table");
+        app.metrics = i18n::t("status.execute_failed");
+        return Task::none();
+    };
+    let statements = data_changes::build_statements(
+        profile.db_kind,
+        &table,
+        &result.columns,
+        &result.rows,
+        &result.edits,
+        &result.inserted,
+        &result.deleted,
+    );
+    if statements.is_empty() {
+        app.last_output = i18n::t("result.no_changes");
+        return Task::none();
+    }
+
+    app.busy = true;
+    app.spike_run += 1;
+    let run_id = app.spike_run;
+    app.metrics = i18n::t("status.running");
+
+    // Oracle batches DML in one anonymous block; Postgres takes multi-statement
+    // strings via simple protocol (see postgres_spike).
+    let sql = match profile.db_kind {
+        DbKind::Postgres => statements.join(";\n"),
+        DbKind::Oracle => format!("BEGIN\n{};\nEND;", statements.join(";\n")),
+    };
+
+    match profile.db_kind {
+        DbKind::Postgres => {
+            let request = PostgresSpikeRequest {
+                connection_url: profile.postgres_url(),
+                sql: Some(sql),
+                timeout_ms: Some(10_000),
+                cancel: false,
+                max_rows: None,
+            };
+            Task::perform(
+                async move {
+                    run_postgres_spike(request)
+                        .await
+                        .map(|result| result.format_for_ui())
+                        .map_err(|err| err.to_string())
+                },
+                move |result| Message::PostFinished(run_id, result),
+            )
+        }
+        DbKind::Oracle => {
+            #[cfg(feature = "oracle")]
+            {
+                use crate::core::oracle_spike::{run_oracle_spike, OracleSpikeRequest};
+                let request = OracleSpikeRequest {
+                    connect_descriptor: profile.oracle_connect_descriptor(),
+                    username: profile.username,
+                    password: profile.password,
+                    connect_as: profile.connect_as,
+                    sql: Some(sql),
+                    timeout_ms: Some(10_000),
+                    cancel: false,
+                    max_rows: None,
                 };
                 Task::perform(
                     async move {
@@ -1667,7 +2376,7 @@ fn run_spike(app: &mut App) -> Task<Message> {
                             .map(|result| result.format_for_ui())
                             .map_err(|err| err.to_string())
                     },
-                    Message::SpikeFinished,
+                    move |result| Message::PostFinished(run_id, result),
                 )
             }
             #[cfg(not(feature = "oracle"))]
@@ -1695,7 +2404,7 @@ fn view(app: &App) -> Element<'_, Message> {
         column![
             worksheet_tabs(app),
             worksheet_connection_bar(app),
-            debug_toolbar(app.debug_system).map(Message::Debug),
+            worksheet_toolbar(app),
             editor_pane(app),
         ]
         .width(Fill)
@@ -1736,8 +2445,31 @@ fn view(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .height(Fill)
             .into()
+    } else if let Some(draft) = &app.cell_editor {
+        stack![
+            base,
+            result_grid::cell_editor_modal(draft).map(Message::Grid)
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
+    } else if app.column_drag.is_some() {
+        stack![base, result_grid::drag_overlay().map(Message::Grid)]
+            .width(Fill)
+            .height(Fill)
+            .into()
     } else if app.dialog.is_some() {
         stack![base, connection_modal(app)]
+            .width(Fill)
+            .height(Fill)
+            .into()
+    } else if app.group_draft.is_some() {
+        stack![base, group_name_modal(app)]
+            .width(Fill)
+            .height(Fill)
+            .into()
+    } else if app.error_modal.is_some() {
+        stack![base, error_modal(app)]
             .width(Fill)
             .height(Fill)
             .into()
@@ -2084,32 +2816,79 @@ fn ribbon(app: &App) -> Element<'_, Message> {
     column![tab_strip, body_band].into()
 }
 
+fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Message> {
+    let selected = app.selected_connection == Some(profile.id);
+    let id = profile.id;
+    let status = app.connection_status.get(&id).copied().unwrap_or_default();
+    let label = profile.summary();
+    let mut label_text = text(label).size(12).font(Font::MONOSPACE);
+    label_text = match status {
+        ConnectionStatus::Connected => label_text.color(ui_theme::success()),
+        ConnectionStatus::Failed => label_text.color(ui_theme::error()),
+        ConnectionStatus::Unknown => label_text,
+    };
+    button(container(label_text).width(Fill).align_x(Horizontal::Left))
+        .width(Fill)
+        .padding(Padding::from([8, 10]))
+        .style(move |_, btn_status| connection_row_style(selected, status, btn_status))
+        .on_press(Message::SelectConnection(id))
+        .into()
+}
+
+/// Collapsible sidebar group header: chevron + name + member count.
+fn group_header(app: &App, name: &str) -> Element<'static, Message> {
+    let collapsed = app.collapsed_groups.contains(name);
+    let members = app.connections.iter().filter(|p| p.group == name).count();
+    let icon = if collapsed {
+        chevron_right().size(12)
+    } else {
+        chevron_down().size(12)
+    };
+    let name = name.to_string();
+    let selected = app.selected_group.as_deref() == Some(name.as_str());
+    let count = text(format!("({members})"))
+        .size(11)
+        .color(ui_theme::current().muted);
+    button(
+        row![
+            icon.color(ui_theme::current().muted),
+            text(name.clone()).size(11),
+            count,
+        ]
+        .spacing(4)
+        .align_y(Vertical::Center),
+    )
+    .width(Fill)
+    .padding(Padding::from([6, 6]))
+    .style(move |_, status| connection_row_style(selected, ConnectionStatus::Unknown, status))
+    .on_press(Message::SelectGroup(name))
+    .into()
+}
+
 fn side_browser(app: &App) -> Element<'_, Message> {
     let mut list = column![].spacing(2);
-    for profile in &app.connections {
-        let selected = app.selected_connection == Some(profile.id);
-        let id = profile.id;
-        let status = app.connection_status.get(&id).copied().unwrap_or_default();
-        let label = profile.summary();
-        let mut label_text = text(label).size(12).font(Font::MONOSPACE);
-        label_text = match status {
-            ConnectionStatus::Connected => label_text.color(Color::from_rgb(0.12, 0.72, 0.32)),
-            ConnectionStatus::Failed => label_text.color(Color::from_rgb(0.90, 0.28, 0.28)),
-            ConnectionStatus::Unknown => label_text,
-        };
-        list = list.push(
-            button(container(label_text).width(Fill).align_x(Horizontal::Left))
-                .width(Fill)
-                .padding(Padding::from([8, 10]))
-                .style(move |_, btn_status| connection_row_style(selected, status, btn_status))
-                .on_press(Message::SelectConnection(id)),
-        );
+    // Groups in persisted order, then ungrouped connections at the end.
+    for group in &app.groups {
+        list = list.push(group_header(app, group));
+        if !app.collapsed_groups.contains(group) {
+            for profile in app.connections.iter().filter(|p| &p.group == group) {
+                list = list.push(connection_row(app, profile));
+            }
+        }
+    }
+    for profile in app.connections.iter().filter(|p| p.group.is_empty()) {
+        list = list.push(connection_row(app, profile));
     }
 
     let connections = column![
         section_title(i18n::t("connections.title")),
         container(
             row![
+                dock_icon_button(
+                    folder_plus().size(14),
+                    i18n::t("connections.add_group"),
+                    Message::AddGroup
+                ),
                 dock_icon_button(
                     plus().size(14),
                     i18n::t("connections.add"),
@@ -2118,12 +2897,20 @@ fn side_browser(app: &App) -> Element<'_, Message> {
                 dock_icon_button(
                     pencil().size(14),
                     i18n::t("connections.edit"),
-                    Message::EditConnection
+                    if app.selected_group.is_some() {
+                        Message::EditGroup
+                    } else {
+                        Message::EditConnection
+                    }
                 ),
                 dock_icon_button(
                     trash().size(14),
                     i18n::t("connections.delete"),
-                    Message::DeleteConnection
+                    if app.selected_group.is_some() {
+                        Message::DeleteGroup
+                    } else {
+                        Message::DeleteConnection
+                    }
                 ),
                 dock_icon_button(
                     plug().size(14),
@@ -2177,11 +2964,7 @@ fn side_browser(app: &App) -> Element<'_, Message> {
         });
 
         if let Some(error) = &app.objects_error {
-            tree = tree.push(
-                text(error.clone())
-                    .size(11)
-                    .color(Color::from_rgb(0.90, 0.40, 0.40)),
-            );
+            tree = tree.push(text(error.clone()).size(11).color(ui_theme::error()));
         }
 
         if app.object_owners.is_empty() && app.objects_error.is_none() {
@@ -2288,6 +3071,45 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
         i18n::t("dialog.connection.database")
     };
 
+    // Groups combo: existing groups + a "no group" entry; the picked name
+    // lands in the draft as plain String (free-form groups stay possible
+    // only via the "new group" dialog).
+    let mut group_options = vec![GroupOption(String::new())];
+    group_options.extend(app.groups.iter().map(|g| GroupOption(g.clone())));
+    let group_field: Element<'_, Message> = column![
+        text(i18n::t("dialog.connection.group"))
+            .size(12)
+            .color(ui_theme::current().muted),
+        pick_list(
+            group_options,
+            Some(GroupOption(draft.group.clone())),
+            |option| Message::DialogGroupChanged(option.0),
+        )
+        .padding(8)
+        .width(Fill),
+    ]
+    .spacing(2)
+    .into();
+
+    let connect_as_field: Element<'_, Message> = if draft.db_kind == DbKind::Oracle {
+        column![
+            text(i18n::t("dialog.connection.connect_as"))
+                .size(12)
+                .color(ui_theme::current().muted),
+            pick_list(
+                [ConnectAs::Normal, ConnectAs::Sysdba, ConnectAs::Sysoper],
+                Some(draft.connect_as),
+                Message::DialogConnectAsChanged,
+            )
+            .padding(8)
+            .width(Fill),
+        ]
+        .spacing(2)
+        .into()
+    } else {
+        Space::new().height(0).into()
+    };
+
     let form = column![
         text(title).size(18),
         labeled_input(
@@ -2295,6 +3117,7 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
             &draft.name,
             Message::DialogNameChanged
         ),
+        group_field,
         text(i18n::t("dialog.connection.db_type"))
             .size(12)
             .color(ui_theme::current().muted),
@@ -2327,10 +3150,9 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
             Message::DialogPasswordChanged,
             true,
         ),
+        connect_as_field,
         if let Some(error) = &app.dialog_error {
-            text(error.clone())
-                .size(12)
-                .color(Color::from_rgb(1.0, 0.45, 0.45))
+            text(error.clone()).size(12).color(ui_theme::error())
         } else {
             text("").size(12)
         },
@@ -2341,7 +3163,7 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
             Space::new().width(Fill),
             button(text(i18n::t("dialog.connection.save")).size(13))
                 .padding(Padding::from([8, 16]))
-                .style(|_, status| primary_button_style(status))
+                .style(|_, status| ui_theme::primary_button(status))
                 .on_press(Message::DialogSave),
         ]
         .spacing(8),
@@ -2350,25 +3172,13 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
     .padding(20)
     .width(420);
 
-    let card = container(form).style(|_| container::Style {
-        background: Some(Background::Color(ui_theme::current().ribbon_bg)),
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        text_color: Some(ui_theme::current().text),
-        ..container::Style::default()
-    });
+    let card = container(form).style(|_| ui_theme::modal_card());
 
     // Dim background only — do not close on outside click (Cancel / Save only).
     let backdrop = container(Space::new().width(Fill).height(Fill))
         .width(Fill)
         .height(Fill)
-        .style(|_| container::Style {
-            background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
-            ..container::Style::default()
-        });
+        .style(|_| ui_theme::modal_backdrop());
 
     opaque(
         stack![
@@ -2385,6 +3195,66 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
 }
 
 /// Modal shown when Connect fails; displays the driver / network error text.
+/// "New / rename group" dialog state; `original` is set while renaming.
+#[derive(Debug, Clone)]
+struct GroupDraft {
+    original: Option<String>,
+    name: String,
+}
+
+/// Modal asking for a new (or renamed) sidebar group name.
+fn group_name_modal(app: &App) -> Element<'_, Message> {
+    let draft = app.group_draft.clone().unwrap_or(GroupDraft {
+        original: None,
+        name: String::new(),
+    });
+    let title_key = if draft.original.is_some() {
+        "dialog.group.rename"
+    } else {
+        "dialog.group.add"
+    };
+    let form = column![
+        text(i18n::t(title_key)).size(18),
+        labeled_input(
+            i18n::t("dialog.group.name"),
+            &draft.name,
+            Message::GroupDraftChanged
+        ),
+        row![
+            button(text(i18n::t("dialog.group.cancel")).size(13))
+                .padding(Padding::from([8, 16]))
+                .on_press(Message::GroupDialogCancel),
+            Space::new().width(Fill),
+            button(text(i18n::t("dialog.group.save")).size(13))
+                .padding(Padding::from([8, 16]))
+                .style(|_, status| ui_theme::primary_button(status))
+                .on_press(Message::GroupDialogSave),
+        ]
+        .spacing(8),
+    ]
+    .spacing(8)
+    .padding(20)
+    .width(320);
+
+    let card = container(form).style(|_| ui_theme::modal_card());
+
+    opaque(
+        stack![
+            container(Space::new().width(Fill).height(Fill))
+                .width(Fill)
+                .height(Fill)
+                .style(|_| ui_theme::modal_backdrop()),
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .center_x(Fill)
+                .center_y(Fill),
+        ]
+        .width(Fill)
+        .height(Fill),
+    )
+}
+
 fn connect_error_modal(app: &App) -> Element<'_, Message> {
     let error = app
         .connect_error
@@ -2394,13 +3264,13 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
     let form = column![
         text(i18n::t("dialog.connect_failed.title"))
             .size(18)
-            .color(Color::from_rgb(0.90, 0.28, 0.28)),
+            .color(ui_theme::error()),
         text(error).size(13).color(ui_theme::current().text),
         row![
             Space::new().width(Fill),
             button(text(i18n::t("dialog.connect_failed.ok")).size(13))
                 .padding(Padding::from([8, 16]))
-                .style(|_, status| primary_button_style(status))
+                .style(|_, status| ui_theme::primary_button(status))
                 .on_press(Message::DismissConnectError),
         ],
     ]
@@ -2408,25 +3278,13 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
     .padding(20)
     .width(460);
 
-    let card = container(form).style(|_| container::Style {
-        background: Some(Background::Color(ui_theme::current().ribbon_bg)),
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        text_color: Some(ui_theme::current().text),
-        ..container::Style::default()
-    });
+    let card = container(form).style(|_| ui_theme::modal_card());
 
     let backdrop = mouse_area(
         container(Space::new().width(Fill).height(Fill))
             .width(Fill)
             .height(Fill)
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
-                ..container::Style::default()
-            }),
+            .style(|_| ui_theme::modal_backdrop()),
     )
     .on_press(Message::DismissConnectError);
 
@@ -2442,6 +3300,314 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .height(Fill),
     )
+}
+
+/// SQL execution error dialog. Closing it moves the caret to the parsed
+/// error position (line/column from ORA-06550 / ORA-06512 / PG "LINE N:").
+fn error_modal(app: &App) -> Element<'_, Message> {
+    let error = app.error_modal.clone().unwrap_or_default();
+
+    let form = column![
+        text(i18n::t("dialog.sql_error.title"))
+            .size(18)
+            .color(ui_theme::error()),
+        scrollable(text(error).size(13).font(Font::MONOSPACE))
+            .height(260)
+            .width(Fill),
+        row![
+            Space::new().width(Fill),
+            button(text(i18n::t("dialog.connect_failed.ok")).size(13))
+                .padding(Padding::from([8, 16]))
+                .style(|_, status| ui_theme::primary_button(status))
+                .on_press(Message::DismissErrorModal),
+        ],
+    ]
+    .spacing(12)
+    .padding(20)
+    .width(560);
+
+    let card = container(form).style(|_| ui_theme::modal_card());
+
+    let backdrop = mouse_area(
+        container(Space::new().width(Fill).height(Fill))
+            .width(Fill)
+            .height(Fill)
+            .style(|_| ui_theme::modal_backdrop()),
+    )
+    .on_press(Message::DismissErrorModal);
+
+    opaque(
+        stack![
+            backdrop,
+            container(card)
+                .width(Fill)
+                .height(Fill)
+                .center_x(Fill)
+                .center_y(Fill),
+        ]
+        .width(Fill)
+        .height(Fill),
+    )
+}
+
+/// Parses `line N[, column M]` from Oracle/Postgres error text.
+///
+/// # Examples
+///
+/// ```
+/// # use plsqlide::ui::app::parse_error_position;
+/// assert_eq!(parse_error_position("ORA-06550: line 5, column 3:"), Some((5, 3)));
+/// assert_eq!(parse_error_position("4/1    PL/SQL: Statement ignored"), Some((4, 1)));
+/// assert_eq!(parse_error_position("no position here"), None);
+/// ```
+pub fn parse_error_position(text: &str) -> Option<(usize, usize)> {
+    for line in text.lines() {
+        if line.contains("ORA-06550") {
+            if let Some(l) = number_after(line, "line ") {
+                return Some((l, number_after(line, "column ").unwrap_or(1)));
+            }
+        }
+    }
+    for line in text.lines() {
+        if line.trim_start().to_ascii_uppercase().starts_with("LINE ") {
+            if let Some(l) = number_after(&line.to_ascii_uppercase(), "LINE ") {
+                return Some((l, 1));
+            }
+        }
+    }
+    for line in text.lines() {
+        if line.contains("ORA-06512") {
+            if let Some(l) = number_after(line, "line ") {
+                return Some((l, 1));
+            }
+        }
+    }
+    // PL/SQL compilation table rows: "LINE/COL ERROR" → "4/1  PL/SQL: ..."
+    for line in text.lines() {
+        for token in line.split_whitespace() {
+            if let Some((l, c)) = token.split_once('/') {
+                let digits = |s: &str| !s.is_empty() && s.chars().all(|ch| ch.is_ascii_digit());
+                if digits(l) && digits(c) {
+                    return Some((l.parse().ok()?, c.parse().ok()?));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Local syntax sanity check: finds the first unbalanced quote, comment or
+/// parenthesis and returns its 1-based (line, column). Used when the DB
+/// error text carries no position of its own.
+///
+/// # Examples
+///
+/// ```
+/// # use plsqlide::ui::app::self_check_position;
+/// assert_eq!(self_check_position("select * from t\nwhere x = 'o"), Some((2, 11)));
+/// assert_eq!(self_check_position("select (1 from t"), Some((1, 8)));
+/// assert_eq!(self_check_position("select * from t -- ok"), None);
+/// assert_eq!(self_check_position("SELECT * D_AGENTS"), Some((1, 10)));
+/// assert_eq!(self_check_position("select a,, b from t"), Some((1, 10)));
+/// assert_eq!(self_check_position("select a, from t"), Some((1, 9)));
+/// assert_eq!(self_check_position("select * from t where 1=1 where 2=2"), Some((1, 27)));
+/// assert_eq!(self_check_position("select price * total from t"), None);
+/// ```
+pub fn self_check_position(sql: &str) -> Option<(usize, usize)> {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    let mut in_string = false;
+    let mut string_start = (1usize, 1usize);
+    let mut in_block_comment = false;
+    let mut comment_start = (1usize, 1usize);
+    let mut in_line_comment = false;
+    let mut open_parens: Vec<(usize, usize)> = Vec::new();
+    let mut tokens: Vec<(String, (usize, usize))> = Vec::new();
+    let mut token_text = String::new();
+    let mut token_start = (1usize, 1usize);
+    let mut chars = sql.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+                line += 1;
+                col = 1;
+                continue;
+            }
+        } else if in_block_comment {
+            if ch == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block_comment = false;
+                col += 2;
+                continue;
+            }
+        } else if in_string {
+            if ch == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    chars.next(); // escaped ''
+                    col += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+        } else {
+            match ch {
+                '-' if chars.peek() == Some(&'-') => {
+                    chars.next();
+                    in_line_comment = true;
+                }
+                '/' if chars.peek() == Some(&'*') => {
+                    chars.next();
+                    in_block_comment = true;
+                    comment_start = (line, col);
+                }
+                '\'' => {
+                    in_string = true;
+                    string_start = (line, col);
+                }
+                '(' => open_parens.push((line, col)),
+                ')' => {
+                    if open_parens.pop().is_none() {
+                        return Some((line, col)); // extra ')'
+                    }
+                }
+                _ => {}
+            }
+            // Tokenize words and statement-shaping symbols for the SELECT lint.
+            if ch.is_alphanumeric() || ch == '_' || ch == '$' || ch == '#' {
+                if token_text.is_empty() {
+                    token_start = (line, col);
+                }
+                token_text.push(ch);
+            } else {
+                if !token_text.is_empty() {
+                    tokens.push((token_text.to_ascii_uppercase(), token_start));
+                    token_text.clear();
+                }
+                if matches!(ch, '(' | ')' | '*' | ',' | ';') {
+                    tokens.push((ch.to_string(), (line, col)));
+                }
+            }
+        }
+        match ch {
+            '\n' => {
+                line += 1;
+                col = 1;
+            }
+            _ => col += 1,
+        }
+    }
+
+    if in_string {
+        return Some(string_start); // unterminated string literal
+    }
+    if in_block_comment {
+        return Some(comment_start); // unterminated /* comment
+    }
+    if !token_text.is_empty() {
+        tokens.push((token_text.to_ascii_uppercase(), token_start));
+    }
+    if let Some((line, col)) = open_parens.last().copied() {
+        return Some((line, col)); // unclosed '('
+    }
+    // Paren depth of every token (for clause-level lints).
+    let mut depths = Vec::with_capacity(tokens.len());
+    let mut depth = 0usize;
+    for (word, _) in &tokens {
+        match word.as_str() {
+            "(" => {
+                depths.push(depth);
+                depth += 1;
+            }
+            ")" => {
+                depth = depth.saturating_sub(1);
+                depths.push(depth);
+            }
+            _ => depths.push(depth),
+        }
+    }
+
+    // Double comma: "a,, b" — flag the extra comma.
+    for window in tokens.windows(2) {
+        if window[0].0 == "," && window[1].0 == "," {
+            return Some(window[1].1);
+        }
+    }
+    // Trailing comma: "a, FROM" / "a,)" / "a," at end — flag the comma.
+    for (i, (word, pos)) in tokens.iter().enumerate() {
+        if word != "," {
+            continue;
+        }
+        let next = tokens.get(i + 1);
+        let ends_list = match next {
+            None => true,
+            Some((n, _)) => matches!(n.as_str(), ")" | ";" | "FROM" | "WHERE"),
+        };
+        if ends_list {
+            return Some(*pos);
+        }
+    }
+    // "SELECT * <ident>" / "SELECT *" with no FROM: a bare select-all star
+    // (preceded by SELECT/,/() followed by anything but FROM. A
+    // multiplication star never enters this branch.
+    if tokens.first().map(|(word, _)| word.as_str()) == Some("SELECT") {
+        for (i, window) in tokens.windows(3).enumerate() {
+            if window[1].0 == "*" && matches!(window[0].0.as_str(), "SELECT" | "," | "(") {
+                let next = &window[2];
+                let next_word = next.0.chars().next().is_some_and(|ch| ch.is_alphabetic());
+                if next_word && next.0 != "FROM" {
+                    return Some(next.1);
+                }
+                if !next_word
+                    && matches!(
+                        next.0.as_str(),
+                        ";" | "WHERE" | "GROUP" | "ORDER" | "HAVING"
+                    )
+                {
+                    return Some(window[1].1);
+                }
+            }
+            let _ = i;
+        }
+        // Bare "SELECT *" at end of text.
+        let last = tokens.last().map(|(w, _)| w.as_str());
+        if matches!(last, Some("*") | Some(";") | None) {
+            if let Some((_, pos)) = tokens.iter().rev().find(|(w, _)| w == "*") {
+                return Some(*pos);
+            }
+        }
+    }
+    // Repeated WHERE at the same depth (subquery WHEREs live deeper);
+    // set-operators (UNION/MINUS/INTERSECT) start a new clause.
+    let mut last_where: Option<(usize, (usize, usize))> = None; // (depth, position)
+    for ((word, position), depth) in tokens.iter().zip(depths.iter()) {
+        match word.as_str() {
+            "UNION" | "MINUS" | "INTERSECT" => last_where = None,
+            "WHERE" => {
+                if last_where.is_some_and(|(d, _)| d == *depth) {
+                    return Some(*position);
+                }
+                last_where = Some((*depth, *position));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn number_after(s: &str, marker: &str) -> Option<usize> {
+    let rest = s.split_once(marker)?.1;
+    let digits: String = rest
+        .chars()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
 }
 
 fn labeled_input(
@@ -2653,7 +3819,7 @@ fn close_tab_confirm_modal(app: &App) -> Element<'_, Message> {
         row![
             button(text(i18n::t("dialog.close_tab.save")).size(13))
                 .padding(Padding::from([8, 16]))
-                .style(|_, status| primary_button_style(status))
+                .style(|_, status| ui_theme::primary_button(status))
                 .on_press(Message::CloseTabSave),
             button(text(i18n::t("dialog.close_tab.discard")).size(13))
                 .padding(Padding::from([8, 16]))
@@ -2669,25 +3835,13 @@ fn close_tab_confirm_modal(app: &App) -> Element<'_, Message> {
     .padding(20)
     .width(440);
 
-    let card = container(form).style(|_| container::Style {
-        background: Some(Background::Color(ui_theme::current().ribbon_bg)),
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        text_color: Some(ui_theme::current().text),
-        ..container::Style::default()
-    });
+    let card = container(form).style(|_| ui_theme::modal_card());
 
     let backdrop = mouse_area(
         container(Space::new().width(Fill).height(Fill))
             .width(Fill)
             .height(Fill)
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
-                ..container::Style::default()
-            }),
+            .style(|_| ui_theme::modal_backdrop()),
     )
     .on_press(Message::CloseTabCancel);
 
@@ -2706,6 +3860,117 @@ fn close_tab_confirm_modal(app: &App) -> Element<'_, Message> {
 }
 
 /// Shows which connection the active worksheet was created for.
+/// Toolbar strip under the connection bar, tailored to the window kind:
+/// Test → debug block + Execute/Stop; SQL/Command → Execute/Stop;
+/// code windows (procedure, package, …) → debug block as before.
+fn worksheet_toolbar(app: &App) -> Element<'static, Message> {
+    let kind = app.worksheets.get(app.active_tab).map(|sheet| sheet.kind);
+    let debug_here =
+        app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
+    let debug = debug_toolbar(app.debug_system, debug_here, app.busy).map(Message::Debug);
+    let execute = toolbar_icon_button(
+        play().size(14),
+        i18n::t("ribbon.execute"),
+        !app.busy && app.active_worksheet_profile().is_some(),
+        Message::MenuExecute,
+    );
+    let stop = toolbar_icon_button(
+        square().size(14),
+        i18n::t("toolbar.stop"),
+        app.busy || app.debug_session.active,
+        Message::MenuStop,
+    );
+    let bar = match kind {
+        Some(WindowKind::Sql | WindowKind::Command) => row![execute, stop],
+        Some(WindowKind::Test) => row![debug],
+        _ => row![debug],
+    };
+    container(bar.spacing(6).align_y(Vertical::Center))
+        .padding(Padding::from([4, 10]))
+        .style(|_| container::Style {
+            background: Some(Background::Color(ui_theme::current().ribbon_body_bg)),
+            text_color: Some(ui_theme::current().text),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// Popup origin so it sits just below the caret line (flips above it when
+/// the caret is near the bottom of the editor). Approximates wrapped lines
+/// as one visual row — `ponytail:` switch to caret geometry if iced exposes it.
+fn completion_popup_origin(
+    caret_line: f32,
+    caret_col: f32,
+    scroll_y: f32,
+    items: usize,
+) -> (f32, f32) {
+    let est_h = (items.min(10) as f32) * 26.0 + 8.0;
+    let line_top = (caret_line * EDITOR_LINE_HEIGHT - scroll_y).max(0.0);
+    let top = if line_top + 24.0 + est_h > 500.0 {
+        (line_top - est_h - 2.0).max(0.0)
+    } else {
+        line_top + 24.0
+    };
+    let left = (24.0 + caret_col * 7.8).min(700.0);
+    (top, left)
+}
+
+#[cfg(test)]
+mod completion_popup_origin_tests {
+    use super::completion_popup_origin;
+
+    #[test]
+    fn below_caret_when_room() {
+        let (top, _) = completion_popup_origin(2.0, 10.0, 0.0, 5);
+        assert!((top - (2.0 * 20.0 + 24.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn flips_above_near_bottom() {
+        let (top, _) = completion_popup_origin(24.0, 0.0, 0.0, 10);
+        assert!(top < 24.0 * 20.0);
+        assert!(top >= 0.0);
+    }
+
+    #[test]
+    fn follows_scroll() {
+        let (top_a, _) = completion_popup_origin(5.0, 0.0, 0.0, 5);
+        let (top_b, _) = completion_popup_origin(5.0, 0.0, 100.0, 5);
+        assert!((top_a - top_b - 100.0).abs() < 0.01);
+    }
+}
+
+fn toolbar_divider() -> Element<'static, Message> {
+    container(rule::vertical(1).style(|_| rule_style()))
+        .height(22)
+        .into()
+}
+
+/// Small icon toolbar button with tooltip; disabled when `enabled` is false.
+fn toolbar_icon_button(
+    icon: iced::widget::Text<'static>,
+    tip: String,
+    enabled: bool,
+    message: Message,
+) -> Element<'static, Message> {
+    use iced::widget::tooltip;
+    let mut btn = button(icon)
+        .padding(Padding::from([5, 7]))
+        .style(move |_, status| {
+            if enabled {
+                ui_theme::chrome_button(status)
+            } else {
+                ui_theme::disabled_button()
+            }
+        });
+    if enabled {
+        btn = btn.on_press(message);
+    }
+    tooltip(btn, text(tip).size(11), tooltip::Position::FollowCursor)
+        .style(|_| ui_theme::tooltip_style())
+        .into()
+}
+
 fn worksheet_connection_bar(app: &App) -> Element<'_, Message> {
     let label = app
         .worksheets
@@ -2742,6 +4007,11 @@ fn worksheet_connection_bar(app: &App) -> Element<'_, Message> {
 ///
 /// Only a window of numbers around the current scroll position is created, so
 /// large documents stay responsive. Click the left margin to toggle a breakpoint.
+fn gutter_width(line_count: usize) -> f32 {
+    let digits = ((line_count.max(1) as f32).log10().floor() as usize) + 1;
+    (digits as f32 * 9.0 + 36.0).clamp(52.0, 80.0)
+}
+
 fn line_number_gutter(
     line_count: usize,
     scroll_y: f32,
@@ -2754,8 +4024,7 @@ fn line_number_gutter(
     let last = (first + GUTTER_VISIBLE_LINES).min(line_count);
     let pixel_offset = scroll_y - first as f32 * EDITOR_LINE_HEIGHT;
 
-    let digits = ((line_count as f32).log10().floor() as usize) + 1;
-    let gutter_width = (digits as f32 * 9.0 + 36.0).clamp(52.0, 80.0);
+    let gutter_width = gutter_width(line_count);
 
     let mut numbers = column![].spacing(0);
     for number in (first + 1)..=last {
@@ -2769,9 +4038,9 @@ fn line_number_gutter(
             " "
         };
         let marker_color = if is_current {
-            Color::from_rgb(0.95, 0.75, 0.15)
+            ui_theme::warning()
         } else if has_bp {
-            Color::from_rgb(0.85, 0.2, 0.2)
+            ui_theme::error()
         } else {
             ui_theme::current().muted
         };
@@ -2830,7 +4099,7 @@ fn gutter_line_style(
     status: iced::widget::button::Status,
 ) -> iced::widget::button::Style {
     let background = if is_current {
-        Some(Background::Color(Color::from_rgba(0.95, 0.75, 0.15, 0.25)))
+        Some(Background::Color(ui_theme::warning()))
     } else if matches!(
         status,
         iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
@@ -2841,7 +4110,11 @@ fn gutter_line_style(
     };
     iced::widget::button::Style {
         background,
-        text_color: ui_theme::current().muted,
+        text_color: if is_current {
+            Color::BLACK
+        } else {
+            ui_theme::current().muted
+        },
         border: Border::default(),
         ..iced::widget::button::Style::default()
     }
@@ -2895,7 +4168,13 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
         .on_action(Message::EditorAction);
 
     let breakpoints = &sheet.breakpoints;
-    let current_line = app.debug_session.current_line;
+    let debug_here =
+        app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
+    let current_line = if debug_here {
+        app.debug_session.current_line
+    } else {
+        None
+    };
     let editor_body = row![
         line_number_gutter(line_count, scroll_y, breakpoints, current_line),
         container(editor)
@@ -2958,17 +4237,58 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
                 ..container::Style::default()
             });
 
+        let caret = sheet.content.cursor().position;
+        let (top, left) = completion_popup_origin(
+            caret.line as f32,
+            caret.column as f32,
+            sheet.scroll_y,
+            app.completion.len(),
+        );
         container(popup)
             .padding(Padding {
-                top: 48.0,
+                top,
                 right: 0.0,
                 bottom: 0.0,
-                left: 24.0,
+                left,
             })
             .into()
     };
 
-    let editor_stack = stack![editor_layer, overlay].width(Fill).height(Fill);
+    // Current debug line: full-width band under the editor text so the paused
+    // line is unmistakable. Approximates wrapped lines as one visual row —
+    // `ponytail:` same ceiling as the gutter; auto-scroll when iced allows it.
+    let debug_here =
+        app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
+    let current_line_layer: Element<'_, Message> =
+        match (debug_here, app.debug_session.current_line) {
+        (true, Some(line)) => {
+            let top =
+                (EDITOR_PADDING + (line as f32 - 1.0) * EDITOR_LINE_HEIGHT - sheet.scroll_y)
+                    .max(0.0);
+            container(Space::new().width(Fill).height(EDITOR_LINE_HEIGHT))
+                .padding(Padding {
+                    top,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: gutter_width(line_count),
+                })
+                .width(Fill)
+                .height(Fill)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(Color {
+                        a: 0.35,
+                        ..ui_theme::warning()
+                    })),
+                    ..container::Style::default()
+                })
+                .into()
+        }
+        _ => Space::new().width(0).height(0).into(),
+    };
+
+    let editor_stack = stack![current_line_layer, editor_layer, overlay]
+        .width(Fill)
+        .height(Fill);
 
     if sheet.kind.shows_parameters() {
         let db_kind = sheet
@@ -2980,10 +4300,28 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
                     .map(|profile| profile.db_kind)
             })
             .unwrap_or(DbKind::Postgres);
+        let show_result_tab = sheet.kind == WindowKind::Sql;
+        let tab = if show_result_tab {
+            app.bottom_tab
+        } else {
+            BottomTab::Parameters
+        };
+        let panel: Element<'_, Message> = match tab {
+            BottomTab::Result => container(result_grid::view(&sheet.result).map(Message::Grid))
+                .width(Fill)
+                .height(app.parameters_height)
+                .into(),
+            BottomTab::Parameters => {
+                parameters_view(&sheet.parameters, db_kind, app.parameters_height)
+                    .map(Message::Param)
+                    .into()
+            }
+        };
         column![
             editor_stack,
             horizontal_resize_handle(),
-            parameters_view(&sheet.parameters, db_kind, app.parameters_height).map(Message::Param),
+            panel_tab_strip(show_result_tab, tab),
+            panel,
         ]
         .spacing(0)
         .width(Fill)
@@ -2992,6 +4330,43 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
     } else {
         editor_stack.into()
     }
+}
+
+/// Tab strip of the bottom panel (Parameters / Results).
+fn panel_tab_strip(show_result: bool, active: BottomTab) -> Element<'static, Message> {
+    let mut strip = row![]
+        .spacing(4)
+        .padding(Padding::from([2, 8]))
+        .align_y(Vertical::Center);
+    strip = strip.push(panel_tab(
+        i18n::t("panel.parameters"),
+        BottomTab::Parameters,
+        active,
+    ));
+    if show_result {
+        strip = strip.push(panel_tab(
+            i18n::t("panel.result"),
+            BottomTab::Result,
+            active,
+        ));
+    }
+    strip.into()
+}
+
+fn panel_tab(label: String, tab: BottomTab, active: BottomTab) -> Element<'static, Message> {
+    let selected = tab == active;
+    button(text(label).size(11))
+        .padding(Padding::from([2, 10]))
+        .style(move |_, status| {
+            let mut style = ui_theme::chrome_button(status);
+            if selected {
+                style.background = Some(Background::Color(ui_theme::current().accent));
+                style.text_color = Color::WHITE;
+            }
+            style
+        })
+        .on_press(Message::BottomTab(tab))
+        .into()
 }
 
 fn status_bar(app: &App) -> Element<'_, Message> {
@@ -3202,6 +4577,7 @@ fn dock_icon_button<'a>(
         text(tip).size(11),
         tooltip::Position::Bottom,
     )
+    .style(|_| ui_theme::tooltip_style())
     .gap(4)
     .into()
 }
@@ -3281,8 +4657,8 @@ fn connection_row_style(
     // Status colors come from the label widget; keep button text neutral so
     // Connected/Failed greens and reds are not overridden by selection white.
     let text_color = match connection_status {
-        ConnectionStatus::Connected => Color::from_rgb(0.12, 0.72, 0.32),
-        ConnectionStatus::Failed => Color::from_rgb(0.90, 0.28, 0.28),
+        ConnectionStatus::Connected => ui_theme::success(),
+        ConnectionStatus::Failed => ui_theme::error(),
         ConnectionStatus::Unknown if selected => Color::WHITE,
         ConnectionStatus::Unknown => ui_theme::current().text,
     };
@@ -3322,21 +4698,6 @@ fn tab_button_style(
             width: 1.0,
             radius: 0.0.into(),
         },
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn primary_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Color::from_rgb(0.25, 0.52, 0.85)
-        }
-        _ => ui_theme::current().accent,
-    };
-    iced::widget::button::Style {
-        background: Some(Background::Color(background)),
-        text_color: Color::WHITE,
-        border: Border::default(),
         ..iced::widget::button::Style::default()
     }
 }
@@ -3385,4 +4746,61 @@ fn file_extension(kind: WindowKind) -> &'static str {
 
 fn default_file_name(kind: WindowKind) -> String {
     format!("untitled.{}", file_extension(kind))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_select_wraps_plain_selects_only() {
+        assert_eq!(
+            page_select("select * from d_agents", DbKind::Postgres, 0, Some(10)),
+            "SELECT * FROM (select * from d_agents) OFFSET 0 ROWS FETCH FIRST 10 ROWS ONLY"
+        );
+        assert_eq!(
+            page_select("SELECT *\nFROM hr.d_agents\n", DbKind::Oracle, 20, Some(10)),
+            "SELECT * FROM (SELECT t.*, ROWNUM AS \"_PLSQLIDE_RN\" FROM (SELECT *\nFROM hr.d_agents) t WHERE ROWNUM <= 30) WHERE \"_PLSQLIDE_RN\" > 20"
+        );
+        assert_eq!(
+            page_select("select * from t", DbKind::Oracle, 10, None),
+            "SELECT * FROM (SELECT t.*, ROWNUM AS \"_PLSQLIDE_RN\" FROM (select * from t) t WHERE ROWNUM <= 1000000000) WHERE \"_PLSQLIDE_RN\" > 10"
+        );
+        assert_eq!(
+            page_select("select * from t", DbKind::Oracle, 0, None),
+            "select * from t"
+        );
+        // DML, multi-statement and FOR UPDATE pass through untouched.
+        assert_eq!(
+            page_select("update t set a = 1", DbKind::Oracle, 0, Some(10)),
+            "update t set a = 1"
+        );
+        assert_eq!(
+            page_select("select 1; select 2", DbKind::Postgres, 0, Some(10)),
+            "select 1; select 2"
+        );
+        assert_eq!(
+            page_select("select * from t for update", DbKind::Oracle, 0, Some(10)),
+            "select * from t for update"
+        );
+        // Leading comments do not hide the SELECT (they are stripped).
+        assert_eq!(
+            page_select(
+                "-- report query\nSELECT * FROM d_agents",
+                DbKind::Oracle,
+                0,
+                Some(10)
+            ),
+            "SELECT * FROM (SELECT * FROM d_agents) WHERE ROWNUM <= 10"
+        );
+        assert_eq!(
+            page_select(
+                "/* start */ select 1 from dual",
+                DbKind::Postgres,
+                0,
+                Some(10)
+            ),
+            "SELECT * FROM (select 1 from dual) OFFSET 0 ROWS FETCH FIRST 10 ROWS ONLY"
+        );
+    }
 }

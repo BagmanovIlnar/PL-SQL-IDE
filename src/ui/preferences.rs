@@ -417,12 +417,12 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
     let footer = row![
         button(text(i18n::t("dialog.common.cancel")).size(13))
             .padding(Padding::from([8, 16]))
-            .style(|_, status| chrome_button_style(status))
+            .style(|_, status| ui_theme::chrome_button(status))
             .on_press(PreferencesMessage::Close),
         Space::new().width(Fill),
         button(text(i18n::t("dialog.common.ok")).size(13))
             .padding(Padding::from([8, 16]))
-            .style(|_, status| primary_button_style(status))
+            .style(|_, status| ui_theme::primary_button(status))
             .on_press(PreferencesMessage::Ok),
     ]
     .spacing(8)
@@ -449,26 +449,14 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
     .width(820)
     .height(560);
 
-    let card = container(form).style(|_| container::Style {
-        background: Some(Background::Color(ui_theme::current().ribbon_bg)),
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        text_color: Some(ui_theme::current().text),
-        ..container::Style::default()
-    });
+    let card = container(form).style(|_| ui_theme::modal_card());
 
     // Capture outside clicks; closing is only via Cancel / OK.
     let backdrop = mouse_area(
         container(Space::new().width(Fill).height(Fill))
             .width(Fill)
             .height(Fill)
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
-                ..container::Style::default()
-            }),
+            .style(|_| ui_theme::modal_backdrop()),
     )
     .on_press(PreferencesMessage::Backdrop);
 
@@ -589,44 +577,6 @@ fn tree_row_style(
                 Color::TRANSPARENT
             },
             width: if selected { 1.0 } else { 0.0 },
-            radius: 2.0.into(),
-        },
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn chrome_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Some(Background::Color(ui_theme::current().hover))
-        }
-        _ => Some(Background::Color(ui_theme::current().chrome_bg)),
-    };
-    iced::widget::button::Style {
-        background,
-        text_color: ui_theme::current().text,
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 2.0.into(),
-        },
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn primary_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Color::from_rgb(0.25, 0.52, 0.85)
-        }
-        _ => ui_theme::current().accent,
-    };
-    iced::widget::button::Style {
-        background: Some(Background::Color(background)),
-        text_color: Color::WHITE,
-        border: Border {
-            color: background,
-            width: 1.0,
             radius: 2.0.into(),
         },
         ..iced::widget::button::Style::default()

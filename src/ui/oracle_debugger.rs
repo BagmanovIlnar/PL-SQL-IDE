@@ -396,6 +396,7 @@ fn help_icon(tip: String) -> Element<'static, OracleDebuggerMessage> {
         text(tip).size(LABEL_SIZE),
         tooltip::Position::FollowCursor,
     )
+    .style(|_| ui_theme::tooltip_style())
     .gap(6)
     .into()
 }

@@ -10,7 +10,7 @@ use iced::widget::{
     button, column, container, mouse_area, opaque, pick_list, row, scrollable, stack, text,
     text_input, tooltip, Space,
 };
-use iced::{Background, Color, Element, Fill, Length, Padding};
+use iced::{Background, Element, Fill, Length, Padding};
 use iced_fonts::lucide::circle_help;
 
 use crate::core::oracle_compiler_prefs::{
@@ -477,26 +477,14 @@ fn compiler_dialog_modal(
 ) -> Element<'_, OracleCompilerMessage> {
     let form = column![content].spacing(10).padding(16).width(420);
 
-    let card = container(form).style(|_| container::Style {
-        background: Some(Background::Color(ui_theme::current().ribbon_bg)),
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        text_color: Some(ui_theme::current().text),
-        ..container::Style::default()
-    });
+    let card = container(form).style(|_| ui_theme::modal_card());
 
     // Click outside closes only this editor, not Preferences.
     let backdrop = mouse_area(
         container(Space::new().width(Fill).height(Fill))
             .width(Fill)
             .height(Fill)
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.45))),
-                ..container::Style::default()
-            }),
+            .style(|_| ui_theme::modal_backdrop()),
     )
     .on_press(on_backdrop);
 
@@ -534,11 +522,11 @@ fn optimize_level_row(level: u8) -> Element<'static, OracleCompilerMessage> {
             column![
                 button(text("▲").size(8).align_x(Horizontal::Center))
                     .padding(Padding::from([1, 6]))
-                    .style(|_, status| chrome_button_style(status))
+                    .style(|_, status| ui_theme::chrome_button(status))
                     .on_press(OracleCompilerMessage::OptimizeInc),
                 button(text("▼").size(8).align_x(Horizontal::Center))
                     .padding(Padding::from([1, 6]))
-                    .style(|_, status| chrome_button_style(status))
+                    .style(|_, status| ui_theme::chrome_button(status))
                     .on_press(OracleCompilerMessage::OptimizeDec),
             ]
             .spacing(1),
@@ -767,12 +755,12 @@ fn editor_buttons(
     row![
         button(text(i18n::t("dialog.common.cancel")).size(13))
             .padding(Padding::from([8, 16]))
-            .style(|_, status| chrome_button_style(status))
+            .style(|_, status| ui_theme::chrome_button(status))
             .on_press(cancel),
         Space::new().width(Fill),
         button(text(i18n::t("dialog.common.ok")).size(13))
             .padding(Padding::from([8, 16]))
-            .style(|_, status| primary_button_style(status))
+            .style(|_, status| ui_theme::primary_button(status))
             .on_press(ok),
     ]
     .spacing(8)
@@ -803,7 +791,7 @@ fn tool_button(
 ) -> Element<'static, OracleCompilerMessage> {
     button(text(label).size(LABEL_SIZE))
         .padding(Padding::from(BTN_PAD))
-        .style(|_, status| chrome_button_style(status))
+        .style(|_, status| ui_theme::chrome_button(status))
         .on_press(message)
         .into()
 }
@@ -830,6 +818,7 @@ fn help_icon(tip: String) -> Element<'static, OracleCompilerMessage> {
         text(tip).size(LABEL_SIZE),
         tooltip::Position::FollowCursor,
     )
+    .style(|_| ui_theme::tooltip_style())
     .gap(6)
     .into()
 }
@@ -848,44 +837,6 @@ fn row_style(selected: bool, status: iced::widget::button::Status) -> iced::widg
         background,
         text_color: ui_theme::current().text,
         border: Border::default(),
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn chrome_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Some(Background::Color(ui_theme::current().hover))
-        }
-        _ => Some(Background::Color(ui_theme::current().chrome_bg)),
-    };
-    iced::widget::button::Style {
-        background,
-        text_color: ui_theme::current().text,
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 2.0.into(),
-        },
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn primary_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Color::from_rgb(0.25, 0.52, 0.85)
-        }
-        _ => ui_theme::current().accent,
-    };
-    iced::widget::button::Style {
-        background: Some(Background::Color(background)),
-        text_color: Color::WHITE,
-        border: Border {
-            color: background,
-            width: 1.0,
-            radius: 2.0.into(),
-        },
         ..iced::widget::button::Style::default()
     }
 }

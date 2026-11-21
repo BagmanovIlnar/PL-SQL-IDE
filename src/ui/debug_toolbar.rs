@@ -11,7 +11,7 @@ use iced::{Background, Color, Element, Fill, Padding};
 use iced_aw::menu::{DrawPath, Item, Menu, MenuBar};
 use iced_aw::style::menu_bar as menu_bar_style;
 use iced_fonts::lucide::{
-    arrow_up, bug, corner_down_right, play, redo, skip_forward, terminal, triangle_alert,
+    arrow_up, bug, corner_down_right, play, redo, skip_forward, square, terminal, triangle_alert,
 };
 
 use crate::core::oracle_debugger_prefs::DebugSystem;
@@ -37,10 +37,16 @@ pub enum DebugToolbarMessage {
     RunToCursor,
     RunToNextException,
     ExecuteSqlInDebugSession,
+    /// Stop the debug session.
+    Stop,
 }
 
 /// Compact debug action bar (icons + Start split-button overlay menu).
-pub fn debug_toolbar(selected_system: DebugSystem) -> Element<'static, DebugToolbarMessage> {
+pub fn debug_toolbar(
+    selected_system: DebugSystem,
+    active: bool,
+    busy: bool,
+) -> Element<'static, DebugToolbarMessage> {
     let start_tip = format!(
         "{} — {}",
         i18n::t("debug.start"),
@@ -48,41 +54,54 @@ pub fn debug_toolbar(selected_system: DebugSystem) -> Element<'static, DebugTool
     );
 
     let bar = row![
-        start_split_button(start_tip, selected_system),
+        start_split_button(start_tip, selected_system, !busy),
         tool_icon(
             play().size(ICON_SIZE),
             i18n::t("debug.run"),
-            DebugToolbarMessage::Run
+            DebugToolbarMessage::Run,
+            active && !busy,
         ),
         tool_icon(
             skip_forward().size(ICON_SIZE),
             i18n::t("debug.step_into"),
             DebugToolbarMessage::StepInto,
+            active && !busy,
         ),
         tool_icon(
             redo().size(ICON_SIZE),
             i18n::t("debug.step_over"),
             DebugToolbarMessage::StepOver,
+            active && !busy,
         ),
         tool_icon(
             arrow_up().size(ICON_SIZE),
             i18n::t("debug.step_out"),
             DebugToolbarMessage::StepOut,
+            active && !busy,
         ),
         tool_icon(
             corner_down_right().size(ICON_SIZE),
             i18n::t("debug.run_to_cursor"),
             DebugToolbarMessage::RunToCursor,
+            active && !busy,
         ),
         tool_icon(
             triangle_alert().size(ICON_SIZE),
             i18n::t("debug.run_to_exception"),
             DebugToolbarMessage::RunToNextException,
+            active && !busy,
         ),
         tool_icon(
             terminal().size(ICON_SIZE),
             i18n::t("debug.execute_sql"),
             DebugToolbarMessage::ExecuteSqlInDebugSession,
+            active && !busy,
+        ),
+        tool_icon(
+            square().size(ICON_SIZE),
+            i18n::t("toolbar.stop"),
+            DebugToolbarMessage::Stop,
+            active && !busy,
         ),
         Space::new().width(Fill),
     ]
@@ -115,16 +134,21 @@ fn system_label(system: DebugSystem) -> String {
 fn start_split_button(
     start_tip: String,
     selected: DebugSystem,
+    enabled: bool,
 ) -> Element<'static, DebugToolbarMessage> {
+    let mut start = button(bug().size(ICON_SIZE))
+        .padding(Padding::from(BTN_PAD))
+        .height(BTN_HEIGHT)
+        .style(|_, status| split_left_style(status));
+    if enabled {
+        start = start.on_press(DebugToolbarMessage::Start);
+    }
     let start = tooltip(
-        button(bug().size(ICON_SIZE))
-            .padding(Padding::from(BTN_PAD))
-            .height(BTN_HEIGHT)
-            .style(|_, status| split_left_style(status))
-            .on_press(DebugToolbarMessage::Start),
+        start,
         text(start_tip).size(11),
         tooltip::Position::FollowCursor,
-    );
+    )
+    .style(|_| ui_theme::tooltip_style());
 
     let menu = Menu::new(vec![
         Item::new(menu_row(
@@ -180,35 +204,17 @@ fn tool_icon<'a>(
     icon: iced::widget::Text<'a>,
     tip: String,
     message: DebugToolbarMessage,
+    enabled: bool,
 ) -> Element<'a, DebugToolbarMessage> {
-    tooltip(
-        button(icon)
-            .padding(Padding::from(BTN_PAD))
-            .style(|_, status| tool_style(status))
-            .on_press(message),
-        text(tip).size(11),
-        tooltip::Position::FollowCursor,
-    )
-    .into()
-}
-
-fn tool_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Some(Background::Color(ui_theme::current().hover))
-        }
-        _ => Some(Background::Color(ui_theme::current().chrome_bg)),
-    };
-    iced::widget::button::Style {
-        background,
-        text_color: ui_theme::current().text,
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 2.0.into(),
-        },
-        ..iced::widget::button::Style::default()
+    let mut button = button(icon)
+        .padding(Padding::from(BTN_PAD))
+        .style(|_, status| ui_theme::chrome_button(status));
+    if enabled {
+        button = button.on_press(message);
     }
+    tooltip(button, text(tip).size(11), tooltip::Position::FollowCursor)
+        .style(|_| ui_theme::tooltip_style())
+        .into()
 }
 
 fn split_bg(status: iced::widget::button::Status) -> Option<Background> {
@@ -221,9 +227,14 @@ fn split_bg(status: iced::widget::button::Status) -> Option<Background> {
 }
 
 fn split_left_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
+    let text_color = if status == iced::widget::button::Status::Disabled {
+        iced::Color { a: 0.35, ..ui_theme::current().text }
+    } else {
+        ui_theme::current().text
+    };
     iced::widget::button::Style {
         background: split_bg(status),
-        text_color: ui_theme::current().text,
+        text_color,
         border: Border {
             color: ui_theme::current().border,
             width: 1.0,
@@ -239,9 +250,14 @@ fn split_left_style(status: iced::widget::button::Status) -> iced::widget::butto
 }
 
 fn split_right_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
+    let text_color = if status == iced::widget::button::Status::Disabled {
+        iced::Color { a: 0.35, ..ui_theme::current().text }
+    } else {
+        ui_theme::current().text
+    };
     iced::widget::button::Style {
         background: split_bg(status),
-        text_color: ui_theme::current().text,
+        text_color,
         border: Border {
             color: ui_theme::current().border,
             width: 1.0,

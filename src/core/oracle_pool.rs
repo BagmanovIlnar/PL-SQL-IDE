@@ -17,7 +17,7 @@ static POOL: LazyLock<Mutex<HashMap<ConnectionId, PoolEntry>>> =
 
 struct PoolEntry {
     #[cfg(feature = "oracle")]
-    target: Connection,
+    target: Option<Connection>,
     #[cfg(feature = "oracle")]
     debug_ctrl: Option<Connection>,
 }
@@ -33,7 +33,7 @@ pub fn open_target(profile: &ConnectionProfile) -> CoreResult<()> {
     guard.insert(
         profile.id,
         PoolEntry {
-            target: connection,
+            target: Some(connection),
             debug_ctrl: None,
         },
     );
@@ -60,7 +60,7 @@ pub fn has_target(id: ConnectionId) -> bool {
 }
 
 #[cfg(feature = "oracle")]
-fn connect_profile(profile: &ConnectionProfile) -> CoreResult<Connection> {
+pub fn connect_profile(profile: &ConnectionProfile) -> CoreResult<Connection> {
     use oracle::Connector;
 
     let mut connector = Connector::new(
@@ -69,6 +69,9 @@ fn connect_profile(profile: &ConnectionProfile) -> CoreResult<Connection> {
         profile.oracle_connect_descriptor(),
     );
     connector.stmt_cache_size(0);
+    if let Some(privilege) = super::oracle_spike::oracle_privilege_for(profile.connect_as) {
+        connector.privilege(privilege);
+    }
     connector
         .connect()
         .map_err(|err| CoreError::Connection(err.to_string()))
@@ -90,7 +93,7 @@ pub mod debug_access {
         if let std::collections::hash_map::Entry::Vacant(e) = guard.entry(profile.id) {
             let target = connect_profile(profile)?;
             e.insert(PoolEntry {
-                target,
+                target: Some(target),
                 debug_ctrl: None,
             });
         }
@@ -108,9 +111,35 @@ pub mod debug_access {
         f: impl FnOnce(&mut Connection) -> CoreResult<R>,
     ) -> CoreResult<R> {
         let mut entry = take(id)?;
-        let result = f(&mut entry.target);
+        let mut target = entry
+            .target
+            .take()
+            .ok_or_else(|| CoreError::Other("debug target session is busy".into()))?;
+        let result = f(&mut target);
+        entry.target = Some(target);
         put(id, entry);
         result
+    }
+
+    /// Detach the target connection so a background thread can keep it while
+    /// the controller keeps polling. Reattach with [`reattach_target`].
+    pub fn detach_target(id: ConnectionId) -> CoreResult<Connection> {
+        let mut entry = take(id)?;
+        let target = entry
+            .target
+            .take()
+            .ok_or_else(|| CoreError::Other("debug target session is busy".into()))?;
+        put(id, entry);
+        Ok(target)
+    }
+
+    /// Give a detached target connection back to the pool.
+    pub fn reattach_target(id: ConnectionId, connection: Connection) {
+        if let Ok(mut guard) = POOL.lock() {
+            if let Some(entry) = guard.get_mut(&id) {
+                entry.target = Some(connection);
+            }
+        }
     }
 
     pub fn with_ctrl_mut<R>(
@@ -138,7 +167,10 @@ pub mod debug_access {
         R2: Send + 'static,
     {
         let mut entry = take(id)?;
-        let mut target = entry.target;
+        let mut target = entry
+            .target
+            .take()
+            .ok_or_else(|| CoreError::Other("debug target session is busy".into()))?;
         let mut ctrl = entry
             .debug_ctrl
             .take()
@@ -163,7 +195,7 @@ pub mod debug_access {
         put(
             id,
             PoolEntry {
-                target,
+                target: Some(target),
                 debug_ctrl: Some(ctrl),
             },
         );

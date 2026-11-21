@@ -8,7 +8,7 @@ use oracle::{Connection, Connector};
 use serde::Serialize;
 use tracing::info;
 
-use super::{CoreError, CoreResult};
+use super::{ConnectAs, CoreError, CoreResult};
 
 /// Request used by the Oracle spike.
 #[derive(Debug, Clone)]
@@ -16,9 +16,13 @@ pub struct OracleSpikeRequest {
     pub connect_descriptor: String,
     pub username: String,
     pub password: String,
+    /// Administrative role (Normal / SYSDBA / SYSOPER).
+    pub connect_as: ConnectAs,
     pub sql: Option<String>,
     pub timeout_ms: Option<u64>,
     pub cancel: bool,
+    /// Server-side row cap for SELECT fetches; `None` fetches everything.
+    pub max_rows: Option<usize>,
 }
 
 /// Result of a successful Oracle spike.
@@ -57,15 +61,18 @@ impl OracleSpikeResult {
 ///
 /// ```no_run
 /// use plsqlide::core::oracle_spike::{run_oracle_spike, OracleSpikeRequest};
+/// use plsqlide::core::ConnectAs;
 ///
 /// # async fn demo() {
 /// let result = run_oracle_spike(OracleSpikeRequest {
 ///     connect_descriptor: "localhost:1521/XEPDB1".into(),
 ///     username: "scott".into(),
 ///     password: "tiger".into(),
+///     connect_as: ConnectAs::Normal,
 ///     sql: Some("select 1 as value from dual".into()),
 ///     timeout_ms: Some(10_000),
 ///     cancel: false,
+///     max_rows: Some(10),
 /// })
 /// .await
 /// .expect("spike");
@@ -77,6 +84,16 @@ pub async fn run_oracle_spike(request: OracleSpikeRequest) -> CoreResult<OracleS
     tokio::task::spawn_blocking(move || run_oracle_spike_blocking(request, timeout_ms))
         .await
         .map_err(|err| CoreError::Other(err.to_string()))?
+}
+
+/// Maps a UI role onto the OCI privilege; Normal needs none.
+/// (crate-visible so pooled sessions in `oracle_pool` reuse the same mapping.)
+pub(crate) fn oracle_privilege_for(connect_as: ConnectAs) -> Option<oracle::Privilege> {
+    match connect_as {
+        ConnectAs::Normal => None,
+        ConnectAs::Sysdba => Some(oracle::Privilege::Sysdba),
+        ConnectAs::Sysoper => Some(oracle::Privilege::Sysoper),
+    }
 }
 
 fn run_oracle_spike_blocking(
@@ -97,6 +114,9 @@ fn run_oracle_spike_blocking(
         &request.connect_descriptor,
     );
     connector.stmt_cache_size(0);
+    if let Some(privilege) = oracle_privilege_for(request.connect_as) {
+        connector.privilege(privilege);
+    }
 
     let connection = connector
         .connect()
@@ -118,6 +138,8 @@ fn run_oracle_spike_blocking(
         .query(&sql, &[])
         .map_err(|err| CoreError::Query(err.to_string()))?;
 
+    info!("oracle query executing");
+
     let mut columns = Vec::new();
     let mut values = Vec::new();
 
@@ -130,8 +152,9 @@ fn run_oracle_spike_blocking(
                 .map(|info| info.name().to_string())
                 .collect();
         }
-        if values.len() >= 100 {
-            continue;
+        // Fetch cap reached — stop, do not drain the cursor.
+        if request.max_rows.is_some_and(|cap| values.len() >= cap) {
+            break;
         }
         let mut line = Vec::with_capacity(columns.len());
         for column_index in 0..columns.len() {
@@ -143,6 +166,20 @@ fn run_oracle_spike_blocking(
         }
         values.push(line);
     }
+
+    // Drop the paging helper column added by the app's ROWNUM wrapper.
+    if columns
+        .last()
+        .map(|name| name.to_ascii_uppercase() == "_PLSQLIDE_RN")
+        .unwrap_or(false)
+    {
+        columns.pop();
+        for line in &mut values {
+            line.pop();
+        }
+    }
+
+    info!(rows = values.len(), "oracle query finished");
 
     Ok(OracleSpikeResult {
         connected: true,

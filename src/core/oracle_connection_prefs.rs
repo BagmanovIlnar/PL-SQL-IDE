@@ -105,6 +105,67 @@ pub fn apply_env_vars(prefs: &OracleConnectionPrefs) {
     }
 }
 
+/// Scan standard Instant Client install locations when the preference is empty.
+#[cfg(unix)]
+fn autodetect_lib_dir() -> Option<PathBuf> {
+    let lib_name = if cfg!(target_os = "macos") {
+        "libclntsh.dylib"
+    } else {
+        "libclntsh.so"
+    };
+    // Explicit override points directly at the library directory.
+    if let Ok(value) = std::env::var("ORACLE_CLIENT_LIB_DIR") {
+        let dir = PathBuf::from(value);
+        if dir.join(lib_name).is_file() {
+            return Some(dir);
+        }
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(PathBuf::from(home).join("oracle"));
+    }
+    roots.push(PathBuf::from("/opt/oracle"));
+    roots.push(PathBuf::from("/usr/lib/oracle"));
+    // ponytail: fixed candidate list (~/oracle, /opt/oracle, /usr/lib/oracle);
+    // add a root here when a new install layout shows up.
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let candidates = [
+                path.clone(),
+                path.join("lib"),
+                path.join("client64").join("lib"),
+            ];
+            for dir in candidates {
+                if dir.join(lib_name).is_file() {
+                    return Some(dir);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+fn autodetect_lib_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn autodetect_finds_dir_from_env_var() {
+        let dir = std::env::temp_dir().join("plsqlide_oci_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("libclntsh.dylib"), b"").unwrap();
+        std::env::set_var("ORACLE_CLIENT_LIB_DIR", &dir);
+        assert_eq!(super::autodetect_lib_dir(), Some(dir));
+    }
+}
+
 /// Ensure ODPI-C is initialized using Preferences → Oracle → Connection.
 ///
 /// Safe to call repeatedly; InitParams only take effect on the first init.
@@ -144,11 +205,12 @@ pub fn prepare_oracle_client() -> CoreResult<()> {
         apply_env_vars(&prefs);
 
         let mut params = oracle::InitParams::new();
-        if let Some(dir) = oci_library_dir(&prefs.oci_library) {
+        let lib_dir = oci_library_dir(&prefs.oci_library).or_else(autodetect_lib_dir);
+        if let Some(dir) = lib_dir {
             params
                 .oracle_client_lib_dir(&dir)
                 .map_err(|err| err.to_string())?;
-            info!(lib_dir = %dir.display(), "oracle client lib dir from preferences");
+            info!(lib_dir = %dir.display(), "oracle client lib dir");
         }
         if let Some(tns) = tns_admin_from_prefs(&prefs) {
             params

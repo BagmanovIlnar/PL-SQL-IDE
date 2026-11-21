@@ -15,6 +15,9 @@ pub struct ConnectionsStore {
     pub connections: Vec<ConnectionProfile>,
     #[serde(default)]
     pub selected: Option<ConnectionId>,
+    /// Sidebar group names, in display order (may be empty of members).
+    #[serde(default)]
+    pub groups: Vec<String>,
 }
 
 fn config_dir() -> PathBuf {

@@ -17,6 +17,8 @@ pub struct PostgresSpikeRequest {
     pub sql: Option<String>,
     pub timeout_ms: Option<u64>,
     pub cancel: bool,
+    /// Server-side row cap for SELECT fetches; `None` fetches everything.
+    pub max_rows: Option<usize>,
 }
 
 /// Result of a successful PostgreSQL spike.
@@ -79,6 +81,7 @@ impl PostgresSpikeResult {
 ///     sql: Some("select version()".into()),
 ///     timeout_ms: Some(5_000),
 ///     cancel: false,
+///     max_rows: Some(10),
 /// })
 /// .await
 /// .expect("spike");
@@ -125,11 +128,18 @@ pub async fn run_postgres_spike(request: PostgresSpikeRequest) -> CoreResult<Pos
         });
     }
 
-    let query_future = connection.fetch_all(sqlx::query(&sql));
-    let rows = timeout(Duration::from_millis(timeout_ms), query_future)
-        .await
-        .map_err(|_| CoreError::Timeout(timeout_ms))?
-        .map_err(|err| CoreError::Query(sanitize_error(&err.to_string())))?;
+    let rows = timeout(Duration::from_millis(timeout_ms), async {
+        if sql.contains(';') {
+            // ponytail: raw_sql (simple protocol) for multi-statement DML batches;
+            // several row-returning statements would mix rows, don't do that.
+            connection.fetch_all(sqlx::raw_sql(&sql)).await
+        } else {
+            connection.fetch_all(sqlx::query(&sql)).await
+        }
+    })
+    .await
+    .map_err(|_| CoreError::Timeout(timeout_ms))?
+    .map_err(|err| CoreError::Query(sanitize_error(&err.to_string())))?;
 
     let columns = if let Some(first) = rows.first() {
         first
@@ -141,8 +151,8 @@ pub async fn run_postgres_spike(request: PostgresSpikeRequest) -> CoreResult<Pos
         Vec::new()
     };
 
-    let mut values = Vec::with_capacity(rows.len().min(100));
-    for row in rows.iter().take(100) {
+    let mut values = Vec::with_capacity(rows.len().min(request.max_rows.unwrap_or(100)));
+    for row in rows.iter().take(request.max_rows.unwrap_or(usize::MAX)) {
         let mut line = Vec::with_capacity(columns.len());
         for index in 0..columns.len() {
             let cell = match row.try_get_raw(index) {

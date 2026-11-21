@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::core::DbKind;
+use crate::core::{ConnectAs, DbKind};
 
 /// Identifier of a saved connection profile.
 pub type ConnectionId = Uuid;
@@ -31,6 +31,12 @@ pub struct ConnectionProfile {
     pub username: String,
     /// Temporary in-memory secret until OS keyring is wired in Phase 1.
     pub password: String,
+    /// Sidebar group name; empty = ungrouped.
+    #[serde(default)]
+    pub group: String,
+    /// Oracle administrative role (SYSDBA / SYSOPER); ignored for Postgres.
+    #[serde(default)]
+    pub connect_as: ConnectAs,
 }
 
 impl ConnectionProfile {
@@ -53,6 +59,8 @@ impl ConnectionProfile {
             database: String::new(),
             username: String::new(),
             password: String::new(),
+            group: String::new(),
+            connect_as: ConnectAs::Normal,
         }
     }
 

@@ -35,3 +35,43 @@ impl std::fmt::Display for DbKind {
         }
     }
 }
+
+/// Oracle administrative connect role ("Connect as" in the connection dialog).
+///
+/// # Examples
+///
+/// ```
+/// use plsqlide::core::ConnectAs;
+///
+/// assert_eq!(ConnectAs::default(), ConnectAs::Normal);
+/// assert_eq!(ConnectAs::Sysdba.as_str(), "sysdba");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectAs {
+    #[default]
+    Normal,
+    Sysdba,
+    Sysoper,
+}
+
+impl ConnectAs {
+    /// Stable lowercase identifier for configs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Sysdba => "sysdba",
+            Self::Sysoper => "sysoper",
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectAs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Normal => write!(f, "{}", crate::ui::i18n::t("role.normal")),
+            Self::Sysdba => write!(f, "SYSDBA"),
+            Self::Sysoper => write!(f, "SYSOPER"),
+        }
+    }
+}

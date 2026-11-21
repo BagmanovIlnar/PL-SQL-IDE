@@ -70,13 +70,26 @@ impl JdwpSession {
     }
 
     /// Host string Oracle should use in `CONNECT_TCP` (reachable address).
-    pub fn connect_host_for_oracle(adapter: &str) -> String {
-        if adapter.eq_ignore_ascii_case("All") || adapter == "0.0.0.0" || adapter.trim().is_empty()
+    ///
+    /// With adapter "All" the bind is `0.0.0.0`, so Oracle needs the IDE
+    /// machine's real address. Guess it as the local IP on the route toward
+    /// the database server (UDP connect sends no packets).
+    pub fn connect_host_for_oracle(adapter: &str, oracle_host: &str) -> String {
+        let chosen = if adapter.eq_ignore_ascii_case("All")
+            || adapter == "0.0.0.0"
+            || adapter.trim().is_empty()
         {
-            "127.0.0.1".into()
+            std::net::UdpSocket::bind("0.0.0.0:0")
+                .and_then(|sock| {
+                    sock.connect((oracle_host, 1521u16))?;
+                    sock.local_addr()
+                })
+                .map(|addr| addr.ip().to_string())
+                .unwrap_or_else(|_| "127.0.0.1".into())
         } else {
             adapter.trim().to_string()
-        }
+        };
+        chosen
     }
 
     /// Accept one Oracle JDWP connection (with timeout) and complete handshake + IDSizes.

@@ -16,12 +16,18 @@ use super::ConnectionId;
 
 #[cfg(feature = "oracle")]
 mod breakflags {
-    pub const BREAK_NEXT_LINE: i32 = 2;
+    /// DBMS_DEBUG values verified live on Oracle 11.2 (`DBMS_DEBUG` package source).
+    pub const BREAK_NEXT_LINE: i32 = 32;
     pub const BREAK_ANY_CALL: i32 = 12;
-    pub const BREAK_ANY_RETURN: i32 = 16;
-    pub const BREAK_EXCEPTION: i32 = 512;
+    pub const BREAK_ANY_RETURN: i32 = 512;
+    pub const BREAK_EXCEPTION: i32 = 2;
     pub const ABORT_EXECUTION: i32 = 8192;
 }
+
+/// Seconds the controller waits for a debug event before CONTINUE reports a
+/// timeout. DBMS_DEBUG.DEFAULT_TIMEOUT is 3600s — a Run with no breakpoint
+/// would block the UI for an hour.
+const PROBE_WAIT_SECS: i32 = 10;
 
 /// Result returned to the UI after a debug command hits the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +59,8 @@ struct LiveDebugState {
     system: DebugSystem,
     #[allow(dead_code)]
     debug_id: String,
+    /// Instrumented (local) debugging: DBMS_PIPE name prefix.
+    pipe: Option<String>,
 }
 
 #[cfg(feature = "oracle")]
@@ -95,6 +103,27 @@ fn run_debug_command_oracle(request: DebugEngineRequest) -> CoreResult<DebugEngi
     use super::oracle_pool;
 
     super::oracle_connection_prefs::prepare_oracle_client()?;
+
+    // Anonymous blocks run under the local instrumented debugger: the source
+    // is rewritten with DBMS_PIPE stop-points, so no server debugger is
+    // needed (Probe cannot step anonymous blocks on 11.2.0.4 anyway).
+    if is_anonymous_source(&request.source)
+        && matches!(
+            request.command,
+            DebugCommand::Start(_)
+                | DebugCommand::Run
+                | DebugCommand::StepInto
+                | DebugCommand::StepOver
+                | DebugCommand::StepOut
+                | DebugCommand::RunToCursor
+                | DebugCommand::RunToNextException
+                | DebugCommand::Stop
+        )
+    {
+        oracle_pool::debug_access::ensure_debug_pair(&request.profile)?;
+        return instrumented_command(request);
+    }
+
     oracle_pool::debug_access::ensure_debug_pair(&request.profile)?;
 
     // After Start, route by active system (JDWP vs Probe).
@@ -150,7 +179,7 @@ fn start_jdwp_session(request: &DebugEngineRequest) -> CoreResult<DebugEngineEve
     let mut log = Vec::new();
     let port = OracleDebuggerPrefs::clamp_jdwp_port(request.prefs.default_jdwp_port);
     let bind = request.prefs.default_jdwp_network_adapter.clone();
-    let oracle_host = JdwpSession::connect_host_for_oracle(&bind);
+    let oracle_host = JdwpSession::connect_host_for_oracle(&bind, &request.profile.host);
 
     let listener = JdwpSession::listen(&bind, port)?;
     log.push(format!("JDWP listening on {}:{}", bind, port));
@@ -204,6 +233,7 @@ fn start_jdwp_session(request: &DebugEngineRequest) -> CoreResult<DebugEngineEve
                 active: true,
                 system: DebugSystem::DbmsDebugJdwp,
                 debug_id: format!("jdwp:{oracle_host}:{port}"),
+                pipe: None,
             },
         );
     JDWP_SESSIONS
@@ -392,6 +422,22 @@ fn start_probe_session(request: &DebugEngineRequest) -> CoreResult<DebugEngineEv
         let row = target
             .query_row_as::<String>("SELECT DBMS_DEBUG.INITIALIZE FROM DUAL", &[])
             .map_err(|err| CoreError::Query(format!("DBMS_DEBUG.INITIALIZE: {err}")))?;
+        // Do not let the controller wait forever when no event arrives.
+        target
+            .execute(
+                "BEGIN DBMS_DEBUG.SET_TIMEOUT_BEHAVIOUR(DBMS_DEBUG.CONTINUE_ON_TIMEOUT); END;",
+                &[],
+            )
+            .map_err(|err| CoreError::Query(format!("SET_TIMEOUT_BEHAVIOUR: {err}")))?;
+        // SET_TIMEOUT is a FUNCTION, not a procedure.
+        target
+            .execute(
+                &format!(
+                    "DECLARE ret BINARY_INTEGER; BEGIN ret := DBMS_DEBUG.SET_TIMEOUT({PROBE_WAIT_SECS}); END;"
+                ),
+                &[],
+            )
+            .map_err(|err| CoreError::Query(format!("target SET_TIMEOUT: {err}")))?;
         target
             .execute("BEGIN DBMS_DEBUG.DEBUG_ON(TRUE); END;", &[])
             .map_err(|err| CoreError::Query(format!("DBMS_DEBUG.DEBUG_ON: {err}")))?;
@@ -404,9 +450,19 @@ fn start_probe_session(request: &DebugEngineRequest) -> CoreResult<DebugEngineEv
         let sql = format!("BEGIN DBMS_DEBUG.ATTACH_SESSION('{attach_id}'); END;");
         ctrl.execute(&sql, &[])
             .map_err(|err| CoreError::Query(format!("DBMS_DEBUG.ATTACH_SESSION: {err}")))?;
+        // SET_TIMEOUT is a FUNCTION, not a procedure.
+        ctrl.execute(
+            &format!(
+                "DECLARE ret BINARY_INTEGER; BEGIN ret := DBMS_DEBUG.SET_TIMEOUT({PROBE_WAIT_SECS}); END;"
+            ),
+            &[],
+        )
+        .map_err(|err| CoreError::Query(format!("DBMS_DEBUG.SET_TIMEOUT: {err}")))?;
         Ok(())
     })?;
-    log.push("controller ATTACH_SESSION ok".into());
+    log.push(format!(
+        "controller ATTACH_SESSION ok (wait {PROBE_WAIT_SECS}s)"
+    ));
 
     apply_probe_filters(id, &request.prefs, &mut log)?;
 
@@ -441,6 +497,7 @@ fn start_probe_session(request: &DebugEngineRequest) -> CoreResult<DebugEngineEv
                 active: true,
                 system: DebugSystem::DbmsDebug,
                 debug_id,
+                pipe: None,
             },
         );
 
@@ -531,36 +588,197 @@ fn continue_probe(
 
     let id = request.profile.id;
     ensure_active(id)?;
-    let mut log = vec![format!("{label} (breakflags={flags})")];
+    let mut log = vec![format!("{label}")];
 
     let maybe_source = SESSION_SOURCE.lock().ok().and_then(|mut g| g.remove(&id));
 
-    let pause = if let Some(source) = maybe_source {
-        let (_target_res, pause) = debug_access::with_pair_parallel(
-            id,
-            move |target| {
-                target
-                    .execute(&source, &[])
-                    .map_err(|err| CoreError::Query(format!("target PL/SQL: {err}")))?;
-                Ok(())
+    let mut pause = if let Some(source) = maybe_source {
+        // Run the block on the target while polling the controller for the
+        // first suspension (Probe reports the interpreter-start pause).
+        let target = debug_access::detach_target(id)?;
+        let join = std::thread::spawn(move || {
+            let mut target = target;
+            let result = target
+                .execute(&source, &[])
+                .map_err(|err| CoreError::Query(format!("target PL/SQL: {err}")));
+            let _ = target.execute("BEGIN DBMS_DEBUG.DEBUG_OFF; END;", &[]);
+            crate::core::oracle_pool::debug_access::reattach_target(id, target);
+            result
+        });
+
+        let first = poll_for_pause(id);
+        log.extend(first.log.clone());
+        if let Some(line) = first.line {
+            log.push(format!("paused at line {line}"));
+        } else {
+            log.push("program finished without pausing".into());
+            let _ = join.join();
+        }
+        // While paused the target thread stays alive inside `execute`; it
+        // reattaches the connection once the block finishes.
+        PauseInfo {
+            line: first.line,
+            status: match first.line {
+                Some(line) => format!("paused at line {line}"),
+                None => "program finished".into(),
             },
-            move |ctrl| probe_continue_on(ctrl, flags),
-        )?;
-        pause
+            log: Vec::new(),
+            paused: first.line.is_some(),
+        }
     } else {
-        debug_access::with_ctrl_mut(id, |ctrl| probe_continue_on(ctrl, flags))?
+        // Resume: ask the target to run with `flags`, then poll for the next
+        // suspension. On servers where CONTINUE cannot deliver its response
+        // (anonymous-block program info is broken on some 11.2 patch levels)
+        // the poll keeps reporting the current line instead.
+        let before = poll_for_pause(id);
+        let resume = debug_access::with_ctrl_mut(id, |ctrl| {
+            ctrl.execute(
+                &format!(
+                    "DECLARE info DBMS_DEBUG.RUNTIME_INFO; r BINARY_INTEGER; \
+                     BEGIN r := DBMS_DEBUG.CONTINUE(info, {flags}, 0); \
+                     DBMS_SESSION.SET_IDENTIFIER('cont=' || r); END;"
+                ),
+                &[],
+            )
+            .map_err(|err| CoreError::Query(format!("DBMS_DEBUG.CONTINUE: {err}")))
+        });
+        match resume {
+            Ok(_) => {
+                let ack = debug_access::with_ctrl_mut(id, |ctrl| {
+                    ctrl.query_row_as::<String>(
+                        "SELECT SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') FROM DUAL",
+                        &[],
+                    )
+                    .map_err(|err| CoreError::Query(format!("client identifier: {err}")))
+                });
+                match ack {
+                    Ok(ident) => log.push(format!("CONTINUE({flags}) ack={ident}")),
+                    Err(err) => log.push(format!("CONTINUE({flags}): {err}")),
+                }
+            }
+            Err(err) => log.push(format!("CONTINUE({flags}): {err}")),
+        }
+
+        let next = poll_for_pause(id);
+        log.extend(next.log.clone());
+        if next.line == before.line && before.line.is_some() {
+            log.push(
+                "the server refused to resume the program (CONTINUE returned                  no result) — this Oracle build restricts Probe stepping"
+                    .into(),
+            );
+        }
+        PauseInfo {
+            line: next.line,
+            status: match next.line {
+                Some(line) => format!("paused at line {line}"),
+                None => "running (no pause reported)".into(),
+            },
+            log: Vec::new(),
+            paused: next.line.is_some(),
+        }
     };
 
-    log.extend(pause.log);
+    if pause.paused && !request.breakpoints.is_empty() {
+        for bp in &request.breakpoints {
+            match set_anonymous_breakpoint(id, bp.line) {
+                Ok(bp_no) => log.push(format!("breakpoint line {} → #{bp_no}", bp.line)),
+                Err(err) => log.push(format!("breakpoint line {}: {err}", bp.line)),
+            }
+        }
+    }
+
+    let line = pause.line;
     Ok(DebugEngineEvent {
         active: true,
         system: DebugSystem::DbmsDebug,
         status: pause.status.clone(),
-        current_line: pause.line,
+        current_line: line,
         message: format!("{label}: {}", pause.status),
         log,
-        variables: read_probe_variables(id, &request.prefs)?,
+        variables: if pause.paused {
+            read_probe_variables(id, &request.prefs)?
+        } else {
+            Vec::new()
+        },
     })
+}
+
+/// Result of one poll round.
+#[cfg(feature = "oracle")]
+struct PollResult {
+    line: Option<usize>,
+    log: Vec<String>,
+}
+
+/// Poll GET_RUNTIME_INFO until the target suspends (line# >= 1) or the
+/// wait budget is exhausted. GET_RUNTIME_INFO is a plain request/response,
+/// which works even where CONTINUE's event delivery does not.
+#[cfg(feature = "oracle")]
+fn poll_for_pause(id: ConnectionId) -> PollResult {
+    use super::oracle_pool::debug_access;
+
+    const ROUNDS: usize = 24; // 24 * 500ms = 12s
+    let mut log = Vec::new();
+    for round in 0..ROUNDS {
+        let ident = debug_access::with_ctrl_mut(id, |ctrl| {
+            ctrl.execute(
+                r#"
+DECLARE
+  info DBMS_DEBUG.RUNTIME_INFO;
+  ret  BINARY_INTEGER;
+BEGIN
+  ret := DBMS_DEBUG.GET_RUNTIME_INFO(
+    DBMS_DEBUG.INFO_GETLINEINFO + DBMS_DEBUG.INFO_GETSTACKDEPTH,
+    info
+  );
+  DBMS_SESSION.SET_IDENTIFIER(
+    'ret=' || ret || '|line=' || NVL(info.Line#, -1) ||
+    '|depth=' || NVL(info.StackDepth, -1)
+  );
+END;"#,
+                &[],
+            )
+            .map_err(|err| CoreError::Query(format!("GET_RUNTIME_INFO: {err}")))?;
+            ctrl.query_row_as::<String>(
+                "SELECT SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') FROM DUAL",
+                &[],
+            )
+            .map_err(|err| CoreError::Query(format!("client identifier: {err}")))
+        });
+        match ident {
+            Ok(state) => {
+                if round == 0 {
+                    log.push(format!("state {state}"));
+                }
+                let mut parts = state.split('|');
+                let _ret = parts.next().unwrap_or("");
+                let line = parts
+                    .next()
+                    .and_then(|part| part.strip_prefix("line="))
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value > 0);
+                let depth = parts
+                    .next()
+                    .and_then(|part| part.strip_prefix("depth="))
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(-1);
+                if let Some(line) = line {
+                    if depth >= 1 {
+                        return PollResult {
+                            line: Some(line),
+                            log,
+                        };
+                    }
+                }
+            }
+            Err(err) => {
+                log.push(format!("poll: {err}"));
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    PollResult { line: None, log }
 }
 
 #[cfg(feature = "oracle")]
@@ -628,6 +846,7 @@ struct PauseInfo {
     line: Option<usize>,
     status: String,
     log: Vec<String>,
+    paused: bool,
 }
 
 #[cfg(feature = "oracle")]
@@ -673,12 +892,14 @@ END;"#
         Some(r) => format!("paused reason={r} retval={retval}"),
         None => format!("continue retval={retval}"),
     };
+    let paused = retval == 0;
     Ok(PauseInfo {
         line,
         status,
         log: vec![format!(
             "CONTINUE flags={flags} retval={retval} line={line:?} raw={ident}"
         )],
+        paused,
     })
 }
 
@@ -695,7 +916,7 @@ DECLARE
   bp   BINARY_INTEGER;
   ret  BINARY_INTEGER;
 BEGIN
-  prog.namespace := DBMS_DEBUG.NAMESPACE_ANONYMOUS;
+  prog.namespace := DBMS_DEBUG.NAMESPACE_CURSOR;
   prog.name      := NULL;
   prog.owner     := NULL;
   prog.dblink    := NULL;
@@ -771,7 +992,23 @@ END;"#,
 #[cfg(feature = "oracle")]
 fn wrap_plsql(source: &str) -> String {
     let trimmed = source.trim().trim_end_matches(';').trim();
-    let upper = trimmed.to_ascii_uppercase();
+    // First non-comment token decides: `-- x\nDECLARE …` is a full block.
+    let mut body = trimmed;
+    loop {
+        let rest = body.trim_start();
+        if rest.starts_with("--") {
+            body = rest.splitn(2, '\n').nth(1).unwrap_or("");
+        } else if rest.starts_with("/*") {
+            match rest.find("*/") {
+                Some(end) => body = &rest[end + 2..],
+                None => break,
+            }
+        } else {
+            body = rest;
+            break;
+        }
+    }
+    let upper = body.to_ascii_uppercase();
     if upper.starts_with("BEGIN") || upper.starts_with("DECLARE") {
         if trimmed.to_ascii_uppercase().ends_with("END") {
             format!("{trimmed};")
@@ -804,4 +1041,395 @@ fn current_system(id: ConnectionId, prefs: &OracleDebuggerPrefs) -> DebugSystem 
         .ok()
         .and_then(|g| g.get(&id).map(|s| s.system))
         .unwrap_or(prefs.default_debug_system)
+}
+
+// ─── Instrumented (local) debugging for anonymous blocks ─────────────────────
+
+/// True when the source is an anonymous PL/SQL block (DECLARE/BEGIN first).
+fn is_anonymous_source(source: &str) -> bool {
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+        let upper = trimmed.to_ascii_uppercase();
+        return upper.starts_with("DECLARE") || upper.starts_with("BEGIN");
+    }
+    false
+}
+
+/// Execute one debug step of the instrumented protocol.
+#[cfg(feature = "oracle")]
+fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEvent> {
+    use super::oracle_pool::debug_access;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    let id = request.profile.id;
+    let state = |pipe: Option<String>, active: bool| {
+        SESSION_STATE
+            .lock()
+            .map_err(|_| CoreError::Other("session state lock".into()))?
+            .insert(
+                id,
+                LiveDebugState {
+                    active,
+                    system: DebugSystem::DbmsDebug,
+                    debug_id: "local".into(),
+                    pipe,
+                },
+            );
+        Ok(())
+    };
+
+    match request.command {
+        DebugCommand::Start(_) => {
+            let pipe = format!(
+                "PLSQLIDE_DBG_{}",
+                &id.simple().to_string()[..8].to_ascii_uppercase()
+            );
+            state(Some(pipe.clone()), true)?;
+            let _ = debug_access::with_ctrl_mut(id, |ctrl| {
+                ctrl.execute(
+                    &format!(
+                        "DECLARE m VARCHAR2(100); BEGIN SYS.DBMS_PIPE.PURGE('{pipe}_E'); \
+                         SYS.DBMS_PIPE.PURGE('{pipe}_C'); END;"
+                    ),
+                    &[],
+                )
+                .map(|_| ())
+                .map_err(|err| CoreError::Query(err.to_string()))
+            });
+            if request.source.trim().is_empty() {
+                SESSION_SOURCE
+                    .lock()
+                    .map_err(|_| CoreError::Other("session source lock".into()))?
+                    .insert(id, request.source.clone());
+                return Ok(DebugEngineEvent {
+                    active: true,
+                    system: DebugSystem::DbmsDebug,
+                    status: "Debugger started (local instrumentation)".into(),
+                    current_line: None,
+                    message: "Local debugger ready — Run / Step operate on the block itself".into(),
+                    log: vec![
+                        "local instrumented debugging: no server debugger involved".into()
+                    ],
+                    variables: Vec::new(),
+                });
+            }
+            SESSION_SOURCE
+                .lock()
+                .map_err(|_| CoreError::Other("session source lock".into()))?
+                .insert(id, request.source.clone());
+            // Start launches the block right away and pauses on the first
+            // executable line — the UI must show the current line at once.
+            instrumented_launch(&request, id, pipe, true)
+        }
+        DebugCommand::Stop => {
+            if let Ok(mut guard) = SESSION_STATE.lock() {
+                if let Some(session) = guard.get(&id) {
+                    if let Some(pipe) = &session.pipe {
+                        let _ = debug_access::with_ctrl_mut(id, |ctrl| {
+                            ctrl.execute(
+                                &format!(
+                                    "DECLARE m VARCHAR2(100); BEGIN SYS.DBMS_PIPE.PACK_MESSAGE('STOP'); \
+                                     m := SYS.DBMS_PIPE.SEND_MESSAGE('{pipe}_C'); END;"
+                                ),
+                                &[],
+                            )
+                            .map(|_| ())
+                            .map_err(|err| CoreError::Query(err.to_string()))
+                        });
+                    }
+                }
+                guard.remove(&id);
+                FINISHED.lock().ok().map(|mut f| f.remove(&id));
+            }
+            Ok(DebugEngineEvent {
+                active: false,
+                system: DebugSystem::DbmsDebug,
+                status: "Debugger stopped".into(),
+                current_line: None,
+                message: "Local debug session stopped".into(),
+                log: Vec::new(),
+                variables: Vec::new(),
+            })
+        }
+        DebugCommand::Run
+        | DebugCommand::StepInto
+        | DebugCommand::StepOver
+        | DebugCommand::StepOut
+        | DebugCommand::RunToCursor
+        | DebugCommand::RunToNextException => {
+            ensure_active(id)?;
+            let pipe = current_pipe(id)?;
+            // A step/run right after Start starts the block and stops on its
+            // first executable line; later presses continue.
+            let resume_first = SESSION_SOURCE
+                .lock()
+                .map(|g| g.contains_key(&id))
+                .unwrap_or(false);
+            instrumented_launch(&request, id, pipe, resume_first)
+        }
+        DebugCommand::ExecuteSqlInDebugSession => {
+            ensure_active(id)?;
+            let pipe = current_pipe(id)?;
+            send_cmd(id, &pipe, "RUN:")?;
+            let finished = FINISHED
+                .lock()
+                .ok()
+                .and_then(|f| f.get(&id).cloned())
+                .unwrap_or_else(|| {
+                    Arc::new(RunState {
+                        finished: AtomicBool::new(true),
+                        error: Mutex::new(None),
+                    })
+                });
+            let (status, current, msgs) = wait_pause(id, &pipe, &finished, false)?;
+            Ok(DebugEngineEvent {
+                active: true,
+                system: DebugSystem::DbmsDebug,
+                status: status.clone(),
+                current_line: current,
+                message: status,
+                log: msgs,
+                variables: Vec::new(),
+            })
+        }
+    }
+}
+
+#[cfg(feature = "oracle")]
+static FINISHED: LazyLock<Mutex<HashMap<ConnectionId, std::sync::Arc<RunState>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Launch the instrumented block (if staged) and wait for the next pause.
+#[cfg(feature = "oracle")]
+fn instrumented_launch(
+    request: &DebugEngineRequest,
+    id: ConnectionId,
+    pipe: String,
+    resume_first: bool,
+) -> CoreResult<DebugEngineEvent> {
+    use super::oracle_pool::debug_access;
+    use std::sync::atomic::Ordering;
+
+    let mode = if resume_first {
+                "STEP".to_string()
+            } else if matches!(
+                request.command,
+                DebugCommand::StepInto | DebugCommand::StepOver | DebugCommand::StepOut
+            ) {
+                "STEP".to_string()
+            } else if matches!(request.command, DebugCommand::Run)
+                && !request.breakpoints.is_empty()
+            {
+                format!(
+                    "RUN:{}",
+                    request
+                        .breakpoints
+                        .iter()
+                        .map(|bp| bp.line.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            } else if matches!(request.command, DebugCommand::RunToCursor) {
+                format!("RUN:{}", request.cursor_line.unwrap_or(1))
+            } else {
+                "RUN:".to_string()
+            };
+
+            let mut log = vec![format!("resume mode {mode}")];
+            send_cmd(id, &pipe, &mode)?;
+
+            let source = if resume_first {
+                SESSION_SOURCE
+                    .lock()
+                    .map_err(|_| CoreError::Other("session source lock".into()))?
+                    .remove(&id)
+            } else {
+                None
+            };
+
+            let finished = if resume_first {
+                let state = new_run_state();
+                FINISHED
+                    .lock()
+                    .map_err(|_| CoreError::Other("finished lock".into()))?
+                    .insert(id, state.clone());
+                state
+            } else {
+                FINISHED
+                    .lock()
+                    .ok()
+                    .and_then(|f| f.get(&id).cloned())
+                    .unwrap_or_else(|| {
+                        std::sync::Arc::new(RunState {
+                            finished: std::sync::atomic::AtomicBool::new(true),
+                            error: std::sync::Mutex::new(None),
+                        })
+                    })
+            };
+
+            if let Some(source) = source {
+                let instrumented = super::dbg_instrument::instrument(&source, &pipe);
+                tracing::info!(
+                    "debug: block staged, {} chars, pipe {pipe}",
+                    instrumented.len()
+                );
+                let target = debug_access::detach_target(id)?;
+                let id2 = id;
+                let state = finished.clone();
+                std::thread::spawn(move || {
+                    let mut target = target;
+                    let outcome = target
+                        .execute(&instrumented, &[])
+                        .map(|_| ())
+                        .map_err(|err| format!("block: {err}"));
+                    tracing::info!("debug: target execute returned {outcome:?}");
+                    if let Err(text) = &outcome {
+                        if let Ok(mut guard) = state.error.lock() {
+                            *guard = Some(text.clone());
+                        }
+                    }
+                    state.finished.store(true, Ordering::SeqCst);
+                    crate::core::oracle_pool::debug_access::reattach_target(id2, target);
+                });
+                log.push("block running under instrumentation".into());
+            }
+
+            let (status, line, msgs) = wait_pause(id, &pipe, &finished, resume_first)?;
+            log.extend(msgs);
+            Ok(DebugEngineEvent {
+                active: true,
+                system: DebugSystem::DbmsDebug,
+                status: status.clone(),
+                current_line: line,
+                message: status,
+                log,
+                variables: Vec::new(),
+            })
+        }
+
+#[cfg(feature = "oracle")]
+fn current_pipe(id: ConnectionId) -> CoreResult<String> {
+    SESSION_STATE
+        .lock()
+        .map_err(|_| CoreError::Other("session state lock".into()))?
+        .get(&id)
+        .and_then(|s| s.pipe.clone())
+        .ok_or_else(|| CoreError::Other("Start the debugger first (F9)".into()))
+}
+
+#[cfg(feature = "oracle")]
+fn send_cmd(id: ConnectionId, pipe: &str, message: &str) -> CoreResult<()> {
+    use super::oracle_pool::debug_access;
+
+    debug_access::with_ctrl_mut(id, |ctrl| {
+        ctrl.execute(
+            &format!(
+                "DECLARE m VARCHAR2(100); BEGIN SYS.DBMS_PIPE.PURGE('{pipe}_C'); \
+                 SYS.DBMS_PIPE.PACK_MESSAGE('{message}'); \
+                 m := SYS.DBMS_PIPE.SEND_MESSAGE('{pipe}_C'); END;"
+            ),
+            &[],
+        )
+        .map_err(|err| CoreError::Query(format!("pipe send: {err}")))?;
+        Ok(())
+    })
+}
+
+/// Wait for the next PAUSE event (or block completion).
+#[cfg(feature = "oracle")]
+fn wait_pause(
+    id: ConnectionId,
+    pipe: &str,
+    finished: &std::sync::Arc<RunState>,
+    first_stop: bool,
+) -> CoreResult<(String, Option<usize>, Vec<String>)> {
+    use super::oracle_pool::debug_access;
+    use std::sync::atomic::Ordering;
+
+    let mut log = Vec::new();
+    for _ in 0..60 {
+        if finished.finished.load(Ordering::SeqCst) {
+            let error = finished
+                .error
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .unwrap_or_default();
+            if error.is_empty() {
+                tracing::info!("debug: block finished, no pause");
+                log.push("block finished".into());
+                return Ok(("program finished".into(), None, log));
+            }
+            tracing::info!("debug: block failed: {error}");
+            log.push(error.clone());
+            return Ok((format!("block failed: {error}"), None, log));
+        }
+        let event = debug_access::with_ctrl_mut(id, |ctrl| {
+            ctrl.execute(
+                &format!(
+                    "DECLARE t INTEGER; m VARCHAR2(100); BEGIN \
+                     t := SYS.DBMS_PIPE.RECEIVE_MESSAGE('{pipe}_E', 1); \
+                     IF t = 0 THEN SYS.DBMS_PIPE.UNPACK_MESSAGE(m); END IF; \
+                     DBMS_SESSION.SET_IDENTIFIER('evt=' || NVL(m, 'none')); END;"
+                ),
+                &[],
+            )
+            .map_err(|err| CoreError::Query(format!("pipe recv: {err}")))?;
+            ctrl.query_row_as::<String>(
+                "SELECT SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') FROM DUAL",
+                &[],
+            )
+            .map_err(|err| CoreError::Query(format!("client identifier: {err}")))
+        });
+        match event {
+            Ok(out) => {
+                if let Some(rest) = out.strip_prefix("evt=PAUSE ") {
+                    if let Ok(line) = rest.trim().parse::<usize>() {
+                        log.push(format!("paused at line {line}"));
+                        return Ok((format!("paused at line {line}"), Some(line), log));
+                    }
+                }
+            }
+            Err(err) => {
+                log.push(format!("wait: {err}"));
+                break;
+            }
+        }
+        let _ = first_stop;
+    }
+    log.push("no pause event within the wait budget".into());
+    Ok(("waiting… (no pause yet)".into(), None, log))
+}
+
+/// Per-connection run state: finished flag + block execution error.
+#[cfg(feature = "oracle")]
+struct RunState {
+    finished: std::sync::atomic::AtomicBool,
+    error: std::sync::Mutex<Option<String>>,
+}
+
+#[cfg(feature = "oracle")]
+fn new_run_state() -> std::sync::Arc<RunState> {
+    std::sync::Arc::new(RunState {
+        finished: std::sync::atomic::AtomicBool::new(false),
+        error: std::sync::Mutex::new(None),
+    })
+}
+
+/// Strip helper re-exported for [`is_anonymous_source`] (feature-independent).
+#[cfg(not(feature = "oracle"))]
+fn is_anonymous_source(source: &str) -> bool {
+    source
+        .lines()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            let upper = line.to_ascii_uppercase();
+            upper.starts_with("DECLARE") || upper.starts_with("BEGIN")
+        })
+        .unwrap_or(false)
 }

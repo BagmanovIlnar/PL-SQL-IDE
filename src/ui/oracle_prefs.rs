@@ -8,7 +8,7 @@ use iced::border::Border;
 use iced::widget::{
     button, column, container, pick_list, row, scrollable, text, text_input, Space,
 };
-use iced::{Background, Color, Element, Fill, Length, Padding};
+use iced::{Background, Element, Fill, Length, Padding};
 
 use crate::core::oracle_connection_prefs::{self as prefs_store};
 pub use crate::core::{OracleConnectionPrefs, OracleEnvVar, OracleSessionMode};
@@ -387,7 +387,7 @@ pub fn oracle_connection_page(form: &OracleConnectionForm) -> Element<'_, Oracle
             .width(Fill),
             button(text(i18n::t("prefs.oracle.client_wizard")).size(FIELD_TEXT))
                 .padding(Padding::from(BTN_PAD))
-                .style(|_, status| chrome_button_style(status))
+                .style(|_, status| ui_theme::chrome_button(status))
                 .on_press(OracleConnectionMessage::OpenClientWizard),
         ]
         .spacing(6)
@@ -410,7 +410,7 @@ pub fn oracle_connection_page(form: &OracleConnectionForm) -> Element<'_, Oracle
             .width(Fill),
             button(text(i18n::t("prefs.oracle.locate_file")).size(FIELD_TEXT))
                 .padding(Padding::from(BTN_PAD))
-                .style(|_, status| chrome_button_style(status))
+                .style(|_, status| ui_theme::chrome_button(status))
                 .on_press(OracleConnectionMessage::LocateOciFile),
         ]
         .spacing(6)
@@ -531,12 +531,12 @@ fn env_editor(draft: &EnvVarDraft) -> Element<'_, OracleConnectionMessage> {
             row![
                 button(text(i18n::t("dialog.common.cancel")).size(FIELD_TEXT))
                     .padding(Padding::from(BTN_PAD))
-                    .style(|_, status| chrome_button_style(status))
+                    .style(|_, status| ui_theme::chrome_button(status))
                     .on_press(OracleConnectionMessage::EnvEditorCancel),
                 Space::new().width(Fill),
                 button(text(i18n::t("dialog.common.ok")).size(FIELD_TEXT))
                     .padding(Padding::from(BTN_PAD))
-                    .style(|_, status| primary_button_style(status))
+                    .style(|_, status| ui_theme::primary_button(status))
                     .on_press(OracleConnectionMessage::EnvEditorOk),
             ]
             .spacing(6),
@@ -563,7 +563,7 @@ fn env_tool_button(
 ) -> Element<'static, OracleConnectionMessage> {
     button(text(label).size(LABEL_SIZE))
         .padding(Padding::from(BTN_PAD))
-        .style(|_, status| chrome_button_style(status))
+        .style(|_, status| ui_theme::chrome_button(status))
         .on_press(message)
         .into()
 }
@@ -603,44 +603,6 @@ fn env_row_style(
         background,
         text_color: ui_theme::current().text,
         border: Border::default(),
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn chrome_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Some(Background::Color(ui_theme::current().hover))
-        }
-        _ => Some(Background::Color(ui_theme::current().chrome_bg)),
-    };
-    iced::widget::button::Style {
-        background,
-        text_color: ui_theme::current().text,
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 2.0.into(),
-        },
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn primary_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Color::from_rgb(0.25, 0.52, 0.85)
-        }
-        _ => ui_theme::current().accent,
-    };
-    iced::widget::button::Style {
-        background: Some(Background::Color(background)),
-        text_color: Color::WHITE,
-        border: Border {
-            color: background,
-            width: 1.0,
-            radius: 2.0.into(),
-        },
         ..iced::widget::button::Style::default()
     }
 }

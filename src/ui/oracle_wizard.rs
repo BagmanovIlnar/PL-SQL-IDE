@@ -342,9 +342,9 @@ pub fn oracle_wizard_modal(wizard: &OracleClientWizard) -> Element<'_, OracleWiz
             .padding(Padding::from(BTN_PAD))
             .style(move |_, status| {
                 if enabled {
-                    primary_button_style(status)
+                    ui_theme::primary_button(status)
                 } else {
-                    disabled_button_style()
+                    ui_theme::disabled_button()
                 }
             });
         if enabled {
@@ -357,9 +357,9 @@ pub fn oracle_wizard_modal(wizard: &OracleClientWizard) -> Element<'_, OracleWiz
             .padding(Padding::from(BTN_PAD))
             .style(move |_, status| {
                 if enabled {
-                    primary_button_style(status)
+                    ui_theme::primary_button(status)
                 } else {
-                    disabled_button_style()
+                    ui_theme::disabled_button()
                 }
             });
         if enabled {
@@ -372,9 +372,9 @@ pub fn oracle_wizard_modal(wizard: &OracleClientWizard) -> Element<'_, OracleWiz
         .padding(Padding::from(BTN_PAD))
         .style(move |_, status| {
             if back_enabled {
-                chrome_button_style(status)
+                ui_theme::chrome_button(status)
             } else {
-                disabled_button_style()
+                ui_theme::disabled_button()
             }
         });
     if back_enabled {
@@ -384,7 +384,7 @@ pub fn oracle_wizard_modal(wizard: &OracleClientWizard) -> Element<'_, OracleWiz
     let footer = row![
         button(text(i18n::t("dialog.common.cancel")).size(FIELD_TEXT))
             .padding(Padding::from(BTN_PAD))
-            .style(|_, status| chrome_button_style(status))
+            .style(|_, status| ui_theme::chrome_button(status))
             .on_press(OracleWizardMessage::Cancel),
         Space::new().width(Fill),
         back_btn,
@@ -422,26 +422,14 @@ pub fn oracle_wizard_modal(wizard: &OracleClientWizard) -> Element<'_, OracleWiz
         .width(560)
         .height(420),
     )
-    .style(|_| container::Style {
-        background: Some(Background::Color(ui_theme::current().ribbon_bg)),
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        text_color: Some(ui_theme::current().text),
-        ..container::Style::default()
-    });
+    .style(|_| ui_theme::modal_card());
 
     // Capture outside clicks so they do not close the wizard or hit Preferences.
     let backdrop = mouse_area(
         container(Space::new().width(Fill).height(Fill))
             .width(Fill)
             .height(Fill)
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.45))),
-                ..container::Style::default()
-            }),
+            .style(|_| ui_theme::modal_backdrop()),
     )
     .on_press(OracleWizardMessage::Backdrop);
 
@@ -467,7 +455,7 @@ fn welcome_step() -> Element<'static, OracleWizardMessage> {
         text(i18n::t("wizard.oracle.welcome.download")).size(FIELD_TEXT),
         button(text(INSTANT_CLIENT_URL).size(LABEL_SIZE))
             .padding(Padding::from([2, 0]))
-            .style(|_, status| link_button_style(status))
+            .style(|_, status| ui_theme::link_button(status))
             .on_press(OracleWizardMessage::OpenDownloadLink),
         text(i18n::t("wizard.oracle.welcome.after_install")).size(FIELD_TEXT),
         Space::new().height(8),
@@ -514,7 +502,7 @@ fn oci_step(wizard: &OracleClientWizard) -> Element<'_, OracleWizardMessage> {
             .style(|_| list_box_style()),
         button(text(i18n::t("wizard.oracle.select_other")).size(FIELD_TEXT))
             .padding(Padding::from(BTN_PAD))
-            .style(|_, status| chrome_button_style(status))
+            .style(|_, status| ui_theme::chrome_button(status))
             .on_press(OracleWizardMessage::BrowseOci),
     ]
     .spacing(8)
@@ -585,7 +573,7 @@ fn network_step(wizard: &OracleClientWizard) -> Element<'_, OracleWizardMessage>
         aliases_block,
         button(text(i18n::t("wizard.oracle.select_other")).size(FIELD_TEXT))
             .padding(Padding::from(BTN_PAD))
-            .style(|_, status| chrome_button_style(status))
+            .style(|_, status| ui_theme::chrome_button(status))
             .on_press(OracleWizardMessage::BrowseTns),
     ]
     .spacing(8)
@@ -1005,72 +993,6 @@ fn list_row_style(
     };
     iced::widget::button::Style {
         background,
-        text_color,
-        border: Border::default(),
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn chrome_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Some(Background::Color(ui_theme::current().hover))
-        }
-        _ => Some(Background::Color(ui_theme::current().chrome_bg)),
-    };
-    iced::widget::button::Style {
-        background,
-        text_color: ui_theme::current().text,
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 2.0.into(),
-        },
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn primary_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let background = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Color::from_rgb(0.25, 0.52, 0.85)
-        }
-        _ => ui_theme::current().accent,
-    };
-    iced::widget::button::Style {
-        background: Some(Background::Color(background)),
-        text_color: Color::WHITE,
-        border: Border {
-            color: background,
-            width: 1.0,
-            radius: 2.0.into(),
-        },
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn disabled_button_style() -> iced::widget::button::Style {
-    iced::widget::button::Style {
-        background: Some(Background::Color(ui_theme::current().chrome_bg)),
-        text_color: ui_theme::current().muted,
-        border: Border {
-            color: ui_theme::current().border,
-            width: 1.0,
-            radius: 2.0.into(),
-        },
-        ..iced::widget::button::Style::default()
-    }
-}
-
-fn link_button_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
-    let text_color = match status {
-        iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
-            Color::from_rgb(0.15, 0.35, 0.85)
-        }
-        _ => ui_theme::current().accent,
-    };
-    iced::widget::button::Style {
-        background: None,
         text_color,
         border: Border::default(),
         ..iced::widget::button::Style::default()

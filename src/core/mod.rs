@@ -2,7 +2,9 @@
 
 pub mod connection_profile;
 pub mod connections_store;
+pub mod data_changes;
 pub mod db_kind;
+pub mod dbg_instrument;
 pub mod debug_session;
 pub mod error;
 #[cfg(feature = "oracle")]
@@ -20,7 +22,7 @@ pub mod postgres_spike;
 pub mod oracle_spike;
 
 pub use connection_profile::{ConnectionId, ConnectionProfile};
-pub use db_kind::DbKind;
+pub use db_kind::{ConnectAs, DbKind};
 pub use debug_session::{Breakpoint, DebugCommand, DebugCommandResult, DebugSession};
 pub use error::{CoreError, CoreResult};
 pub use oracle_compiler_prefs::{

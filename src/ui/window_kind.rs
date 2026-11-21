@@ -161,13 +161,14 @@ impl WindowKind {
                  END;\n\
                  /\n"
             }
+            // ponytail: no SQL*Plus slash — the block is executed as-is and
+            // `/` would be an invalid character.
             Self::Test => {
                 "DECLARE\n\
                  \t  v_x NUMBER;\n\
                  BEGIN\n\
                  \t  NULL;\n\
-                 END;\n\
-                 /\n"
+                 END;\n"
             }
             Self::Sql => "SELECT * FROM dual;\n",
             Self::Command => "SET SERVEROUTPUT ON\n",
