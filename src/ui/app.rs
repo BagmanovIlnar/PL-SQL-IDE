@@ -5626,17 +5626,11 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             .font(Font::MONOSPACE)
             .width(Fill)
             .style(|_, _| console_input_style());
-        // Selectable history scrolls above; the SQL> input row is FIXED
-        // below it. An inline prompt inside the scroll is what kept making
-        // the field "disappear" after Enter (it scrolled below the fold).
-        column![
-            scrollable(column![history].padding(Padding::from([6, 8])))
-                .id(iced::widget::Id::new("command-console"))
-                .height(Fill)
-                .direction(both_scroll())
-                .style(|_, _| plain_scroll_style()),
-            rule::horizontal(1).style(|_| rule_style()),
-            container(
+        // v3 layout, as requested: the SQL> prompt stays inline after the
+        // history inside the scroll.
+        scrollable(
+            column![
+                history,
                 row![
                     text("SQL> ")
                         .size(12)
@@ -5644,15 +5638,15 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
                         .color(ui_theme::current().accent),
                     input,
                 ]
-                .spacing(0)
-                .align_y(Vertical::Center)
-            )
-            .padding(Padding::from([4, 8]))
-            .width(Fill),
-        ]
-        .spacing(0)
+                .align_y(Vertical::Center),
+            ]
+            .spacing(0)
+            .padding(Padding::from([6, 8])),
+        )
+        .id(iced::widget::Id::new("command-console"))
         .height(Fill)
-        .width(Fill)
+        .direction(both_scroll())
+        .style(|_, _| plain_scroll_style())
         .into()
     };
 
