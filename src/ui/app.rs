@@ -6119,6 +6119,45 @@ fn default_file_name(kind: WindowKind) -> String {
 }
 
 #[cfg(test)]
+mod command_history_tests {
+    use super::*;
+
+    /// Two full command rounds through the real update loop: every echo and
+    /// every result must stay in the dialog (it is a command line — history
+    /// is never cleared).
+    #[test]
+    fn command_history_accumulates() {
+        let mut app = App::new();
+        app.open_window(WindowKind::Command);
+        for (cmd, value) in [("select 1 from dual;", "1"), ("select 2 from dual;", "2")] {
+            update(&mut app, Message::CommandInput(cmd.to_string()));
+            update(&mut app, Message::CommandSubmit);
+            let run_id = app.spike_run;
+            let sheet = app.worksheets.get(app.active_tab).unwrap();
+            assert!(sheet.command_dialog.contains(&format!("SQL> {cmd}")));
+            assert!(sheet.command_input.is_empty());
+            update(
+                &mut app,
+                Message::SpikeFinished(
+                    run_id,
+                    Ok(SpikePayload {
+                        sql: cmd.to_string(),
+                        output: format!("connected=true"),
+                        columns: vec![value.to_string()],
+                        rows: vec![vec![value.to_string()]],
+                        notices: Vec::new(),
+                    }),
+                ),
+            );
+            let sheet = app.worksheets.get(app.active_tab).unwrap();
+            assert!(sheet.command_dialog.contains(value));
+        }
+        let sheet = &app.worksheets[app.active_tab];
+        assert!(sheet.command_dialog.contains("SQL> select 1 from dual;"));
+        assert!(sheet.command_dialog.contains("SQL> select 2 from dual;"));
+    }
+}
+
 mod tests {
     use super::*;
 
