@@ -5330,7 +5330,14 @@ fn sqlplus_table(columns: &[String], rows: &[Vec<String>]) -> String {
 /// position (snap_to_end would also jump to the right edge of wide tables
 /// and the console would look blank).
 fn console_snap_to_bottom() -> Task<Message> {
-    iced::widget::operation::snap_to(iced::widget::Id::new("command-console"), (None, Some(1.0)))
+    use iced::widget::operation::RelativeOffset;
+    iced::widget::operation::snap_to(
+        iced::widget::Id::new("command-console"),
+        RelativeOffset {
+            x: None,
+            y: Some(1.0),
+        },
+    )
 }
 
 fn command_banner(app: &App) -> String {
