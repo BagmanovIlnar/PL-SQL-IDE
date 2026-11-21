@@ -1085,13 +1085,11 @@ impl App {
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
-        Message::ModalErrorAction(_) => {
-            // Read-only: rebuild the content from the stored text on every edit.
-            if let Some(text) = app.error_modal.clone() {
-                app.error_content = Content::with_text(&text);
-            }
-            if let Some(text) = app.connect_error.clone() {
-                app.connect_error_content = Content::with_text(&text);
+        Message::ModalErrorAction(action) => {
+            // Read-only: apply selection/scroll, ignore text edits.
+            if !matches!(action, Action::Edit(_)) {
+                app.error_content.perform(action.clone());
+                app.connect_error_content.perform(action);
             }
             Task::none()
         }
