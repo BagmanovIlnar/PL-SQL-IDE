@@ -21,6 +21,7 @@ use iced::{
 };
 use iced_fonts::lucide::{
     chevron_down, chevron_right, database, folder_plus, pencil, play, plug, plus, square, trash,
+    unplug,
 };
 use iced_fonts::LUCIDE_FONT_BYTES;
 
@@ -3196,7 +3197,11 @@ fn side_browser(app: &App) -> Element<'_, Message> {
                     }
                 ),
                 dock_icon_button(
-                    plug().size(14),
+                    if app.selected_is_connected() {
+                        unplug().size(14)
+                    } else {
+                        plug().size(14)
+                    },
                     if app.selected_is_connected() {
                         i18n::t("connections.disconnect")
                     } else {
