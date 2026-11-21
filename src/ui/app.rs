@@ -178,9 +178,6 @@ struct Worksheet {
     command_edit: bool,
     /// Command window dialog: accumulated "SQL> …" history with output.
     command_dialog: String,
-    /// Selectable view of `command_dialog` (rebuilt on append). Edits typed
-    /// into it are routed to the always-visible SQL> input below.
-    command_dialog_view: Content,
     /// Output held back while paused; flushed into the dialog on resume.
     command_pending: String,
     /// Line index of the current entry (its echo) in `command_dialog`, so the
@@ -488,8 +485,6 @@ enum Message {
     EditorThumbRelease,
     /// Copy a modal's error text to the clipboard.
     CopyError(String),
-    /// Console selection/copy; typed keys route to the SQL> input.
-    ConsoleAction(Action),
     /// Put keyboard focus on the SQL> input (deferred, post-render).
     CommandFocus,
     FilterChanged(String),
@@ -745,7 +740,6 @@ impl App {
             dirty: false,
             command_edit: false,
             command_dialog: String::new(),
-            command_dialog_view: Content::new(),
             command_pending: String::new(),
             command_entry_line: 0,
             command_paused: false,
@@ -1199,45 +1193,6 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
         Message::CommandFocus => focus_command_input(),
-        Message::ConsoleAction(action) => {
-            // Selection/copy stay in the console editor; typed keys are
-            // routed into the SQL> input, so focus can live anywhere.
-            let mut enter = false;
-            let mut focus_back = false;
-            match action {
-                Action::Edit(edit) => {
-                    focus_back = true;
-                    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                        match edit {
-                            Edit::Insert(c) => sheet.command_input.push(c),
-                            Edit::Paste(text) => sheet.command_input.push_str(&text),
-                            Edit::Backspace => {
-                                sheet.command_input.pop();
-                            }
-                            Edit::Enter => enter = true,
-                            Edit::Indent | Edit::Unindent | Edit::Delete => {}
-                        }
-                    }
-                }
-                other => {
-                    tracing::info!(target: "command", action = ?other, "console mouse/scroll action");
-                    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                        sheet.command_dialog_view.perform(other);
-                        let cursor = sheet.command_dialog_view.cursor();
-                        tracing::info!(target: "command", selected = cursor.selection.is_some(), "selection state after action");
-                    }
-                }
-            }
-            if enter {
-                update_inner(app, Message::CommandSubmit)
-            } else if focus_back {
-                // Bring the inline SQL> prompt into view before the routed
-                // keystrokes land in the input.
-                Task::batch([console_snap_to_bottom(), focus_command_input()])
-            } else {
-                Task::none()
-            }
-        }
         Message::VarDetails(name, value) => {
             app.var_details = Some((name, value));
             Task::none()
@@ -5325,10 +5280,9 @@ fn console_expand_tabs(value: &str) -> String {
     value.replace('\t', "    ")
 }
 
-/// Appends console text to the dialog history and rebuilds its view.
+/// Appends console text to the dialog history.
 fn dialog_push(sheet: &mut Worksheet, value: &str) {
     sheet.command_dialog.push_str(value);
-    sheet.command_dialog_view = Content::with_text(&sheet.command_dialog);
 }
 
 /// SQL*Plus terminators: a lone `/` line means "run" and a trailing `;` after
@@ -5514,17 +5468,6 @@ fn console_input_style() -> iced::widget::text_input::Style {
     }
 }
 
-/// Same look as the console text: transparent, no borders.
-fn console_editor_style(_status: text_editor::Status) -> text_editor::Style {
-    text_editor::Style {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border::default(),
-        placeholder: ui_theme::current().muted,
-        value: ui_theme::current().text,
-        selection: ui_theme::current().accent,
-    }
-}
-
 /// Command window (like PL/SQL Developer): Execute / Pause / Stop buttons
 /// above an inner tabsheet with the Dialog (interactive console session)
 /// and Edit tabs.
@@ -5612,16 +5555,11 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             })
             .unwrap_or(false);
         let history: Element<'a, Message> = if !dialog.is_empty() {
-            // Selectable history: mouse selection, Cmd+A select-all, Cmd+C
-            // copy. Typed keys are routed to the fixed SQL> input below.
-            text_editor(&sheet.command_dialog_view)
+            // Plain text (v3): stable, never steals keys from the SQL> input.
+            text(dialog)
                 .size(12)
                 .font(Font::MONOSPACE)
-                // Default height is Fill — collapses to zero in a scrollable.
-                .height(iced::Length::Shrink)
                 .wrapping(iced::widget::text::Wrapping::None)
-                .on_action(Message::ConsoleAction)
-                .style(|_, status| console_editor_style(status))
                 .into()
         } else if let Some(p) = profile.filter(|_| connected) {
             text(command_banner_for(p))
@@ -5643,17 +5581,10 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             .font(Font::MONOSPACE)
             .width(Fill)
             .style(|_, _| console_input_style());
-        // History scrolls and is selectable; the SQL> input row is FIXED
-        // below the scroll — it cannot be scrolled out of sight, so typed
-        // text is always on screen (fixes "поле пропадает").
-        column![
-            scrollable(column![history].padding(Padding::from([6, 8])))
-                .id(iced::widget::Id::new("command-console"))
-                .height(Fill)
-                .direction(both_scroll())
-                .style(|_, _| plain_scroll_style()),
-            rule::horizontal(1).style(|_| rule_style()),
-            container(
+        // v3 console look: history, then the inline SQL> prompt after it.
+        scrollable(
+            column![
+                history,
                 row![
                     text("SQL> ")
                         .size(12)
@@ -5661,15 +5592,15 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
                         .color(ui_theme::current().accent),
                     input,
                 ]
-                .spacing(0)
-                .align_y(Vertical::Center)
-            )
-            .padding(Padding::from([4, 8]))
-            .width(Fill),
-        ]
-        .spacing(0)
+                .align_y(Vertical::Center),
+            ]
+            .spacing(0)
+            .padding(Padding::from([6, 8])),
+        )
+        .id(iced::widget::Id::new("command-console"))
         .height(Fill)
-        .width(Fill)
+        .direction(both_scroll())
+        .style(|_, _| plain_scroll_style())
         .into()
     };
 
