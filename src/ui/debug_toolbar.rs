@@ -55,11 +55,12 @@ pub fn debug_toolbar(
 
     let bar = row![
         start_split_button(start_tip, selected_system, !busy),
+        // Run auto-starts a fresh debug run, so it needs no active session.
         tool_icon(
             play().size(ICON_SIZE),
             i18n::t("debug.run"),
             DebugToolbarMessage::Run,
-            active && !busy,
+            !busy,
         ),
         tool_icon(
             skip_forward().size(ICON_SIZE),

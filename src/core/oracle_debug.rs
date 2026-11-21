@@ -1082,29 +1082,36 @@ fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEv
         Ok(())
     };
 
+    // Prepare (or reset) the instrumented session: fresh pipe name, state,
+    // stale-pipe purge, stage the editor source. Returns the pipe id.
+    let start_prep = |request: &DebugEngineRequest| -> CoreResult<String> {
+        let pipe = format!(
+            "PLSQLIDE_DBG_{}",
+            &id.simple().to_string()[..8].to_ascii_uppercase()
+        );
+        state(Some(pipe.clone()), true)?;
+        let _ = debug_access::with_ctrl_mut(id, |ctrl| {
+            ctrl.execute(
+                &format!(
+                    "DECLARE m VARCHAR2(100); BEGIN SYS.DBMS_PIPE.PURGE('{pipe}_E'); \
+                     SYS.DBMS_PIPE.PURGE('{pipe}_C'); END;"
+                ),
+                &[],
+            )
+            .map(|_| ())
+            .map_err(|err| CoreError::Query(err.to_string()))
+        });
+        SESSION_SOURCE
+            .lock()
+            .map_err(|_| CoreError::Other("session source lock".into()))?
+            .insert(id, request.source.clone());
+        Ok(pipe)
+    };
+
     match request.command {
         DebugCommand::Start(_) => {
-            let pipe = format!(
-                "PLSQLIDE_DBG_{}",
-                &id.simple().to_string()[..8].to_ascii_uppercase()
-            );
-            state(Some(pipe.clone()), true)?;
-            let _ = debug_access::with_ctrl_mut(id, |ctrl| {
-                ctrl.execute(
-                    &format!(
-                        "DECLARE m VARCHAR2(100); BEGIN SYS.DBMS_PIPE.PURGE('{pipe}_E'); \
-                         SYS.DBMS_PIPE.PURGE('{pipe}_C'); END;"
-                    ),
-                    &[],
-                )
-                .map(|_| ())
-                .map_err(|err| CoreError::Query(err.to_string()))
-            });
+            let pipe = start_prep(&request)?;
             if request.source.trim().is_empty() {
-                SESSION_SOURCE
-                    .lock()
-                    .map_err(|_| CoreError::Other("session source lock".into()))?
-                    .insert(id, request.source.clone());
                 return Ok(DebugEngineEvent {
                     active: true,
                     system: DebugSystem::DbmsDebug,
@@ -1117,10 +1124,6 @@ fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEv
                     variables: Vec::new(),
                 });
             }
-            SESSION_SOURCE
-                .lock()
-                .map_err(|_| CoreError::Other("session source lock".into()))?
-                .insert(id, request.source.clone());
             // Start launches the block right away and pauses on the first
             // executable line — the UI must show the current line at once.
             instrumented_launch(&request, id, pipe, true)
@@ -1161,14 +1164,33 @@ fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEv
         | DebugCommand::StepOut
         | DebugCommand::RunToCursor
         | DebugCommand::RunToNextException => {
-            ensure_active(id)?;
-            let pipe = current_pipe(id)?;
-            // A step/run right after Start starts the block and stops on its
-            // first executable line; later presses continue.
-            let resume_first = SESSION_SOURCE
+            // No live session (never started, or the block already finished)
+            // → Run starts a fresh debug run and pauses on the first line.
+            let needs_start = !SESSION_STATE
                 .lock()
                 .map(|g| g.contains_key(&id))
-                .unwrap_or(false);
+                .unwrap_or(true)
+                || FINISHED
+                    .lock()
+                    .ok()
+                    .and_then(|f| f.get(&id).cloned())
+                    .map(|st| st.finished.load(Ordering::SeqCst))
+                    .unwrap_or(true);
+            let resume_first = if needs_start {
+                if request.source.trim().is_empty() {
+                    return Err(CoreError::Other(
+                        "Editor is empty — nothing to execute".into(),
+                    ));
+                }
+                let pipe = start_prep(&request)?;
+                return instrumented_launch(&request, id, pipe, true);
+            } else {
+                SESSION_SOURCE
+                    .lock()
+                    .map(|g| g.contains_key(&id))
+                    .unwrap_or(false)
+            };
+            let pipe = current_pipe(id)?;
             instrumented_launch(&request, id, pipe, resume_first)
         }
         DebugCommand::ExecuteSqlInDebugSession => {
