@@ -1511,15 +1511,16 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.metrics = i18n::t("status.cancelled");
             Task::none()
         }
-        Message::CommandTab(false) => {
-            tracing::info!(target: "command", "focus: tab switch to dialog");
-            focus_command_input()
-        }
         Message::CommandTab(edit) => {
             if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                 sheet.command_edit = edit;
             }
-            Task::none()
+            if edit {
+                Task::none()
+            } else {
+                tracing::info!(target: "command", "focus: tab switch to dialog");
+                focus_command_input()
+            }
         }
         Message::CommandInput(value) => {
             tracing::info!(target: "command", chars = value.chars().count(), "input keystroke reached SQL> line");
