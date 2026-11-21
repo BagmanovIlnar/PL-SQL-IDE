@@ -1265,7 +1265,6 @@ static FINISHED: LazyLock<Mutex<HashMap<ConnectionId, std::sync::Arc<RunState>>>
 /// Detach the target connection, waiting up to ~5s while a previous run's
 /// thread finishes dying (Stop + start_prep's STOP should kill it quickly).
 fn detach_target_with_retry(id: ConnectionId) -> CoreResult<(oracle::Connection, u64)> {
-    use super::oracle_pool::debug_access;
     for _ in 0..25 {
         match debug_access::detach_target(id) {
             Ok(pair) => return Ok(pair),

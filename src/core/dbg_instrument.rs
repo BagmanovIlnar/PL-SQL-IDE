@@ -13,10 +13,14 @@
 /// `PLSQLIDE__MODE` is the enclosing block's local variable; it carries the
 /// resume mode between calls: `STEP`, `STOP` or `RUN:<line>,<line>,…`.
 fn stub(pipe: &str) -> String {
+    // Two-phase pause: plsqlide__dbg only DECIDES to pause (no blocking);
+    // the generated variable pack then runs with pre-statement values; only
+    // then plsqlide__pause announces PAUSE and blocks for the next command.
+    // Packing after the blocking dbg returned 1 sent values one statement
+    // late — the UI showed stale variable values at every pause.
     format!(
         "plsqlide__mode VARCHAR2(300) := 'STEP'; \
          FUNCTION plsqlide__dbg(n NUMBER) RETURN NUMBER IS \
-           st INTEGER; \
          BEGIN \
            IF SYS.DBMS_PIPE.RECEIVE_MESSAGE('{p}_C', 0) = 0 THEN \
              SYS.DBMS_PIPE.UNPACK_MESSAGE(plsqlide__mode); \
@@ -27,18 +31,22 @@ fn stub(pipe: &str) -> String {
            IF plsqlide__mode = 'STEP' \
               OR INSTR(',' || REPLACE(plsqlide__mode, 'RUN:', ',') || ',', ',' || n || ',') > 0 \
            THEN \
-             SYS.DBMS_PIPE.PACK_MESSAGE('PAUSE ' || n); \
-             st := SYS.DBMS_PIPE.SEND_MESSAGE('{p}_E'); \
-             LOOP \
-               EXIT WHEN SYS.DBMS_PIPE.RECEIVE_MESSAGE('{p}_C', 1) = 0; \
-             END LOOP; \
-             SYS.DBMS_PIPE.UNPACK_MESSAGE(plsqlide__mode); \
-             IF plsqlide__mode = 'STOP' THEN \
-               RAISE_APPLICATION_ERROR(-20999, 'PLSQLIDE: debug stopped'); \
-             END IF; \
              RETURN 1; \
            END IF; \
            RETURN 0; \
+         END; \
+         PROCEDURE plsqlide__pause(n NUMBER) IS \
+           st INTEGER; \
+         BEGIN \
+           SYS.DBMS_PIPE.PACK_MESSAGE('PAUSE ' || n); \
+           st := SYS.DBMS_PIPE.SEND_MESSAGE('{p}_E'); \
+           LOOP \
+             EXIT WHEN SYS.DBMS_PIPE.RECEIVE_MESSAGE('{p}_C', 1) = 0; \
+           END LOOP; \
+           SYS.DBMS_PIPE.UNPACK_MESSAGE(plsqlide__mode); \
+           IF plsqlide__mode = 'STOP' THEN \
+             RAISE_APPLICATION_ERROR(-20999, 'PLSQLIDE: debug stopped'); \
+           END IF; \
          END;",
         p = pipe
     )
@@ -340,8 +348,14 @@ pub fn instrument(source: &str, pipe: &str) -> String {
             .collect();
         let mut line = line.to_string();
         for (stmt, vars) in &calls {
+            // ponytail: packs run BEFORE plsqlide__pause so the engine reads
+            // current values; empty packs still call pause to block.
             let packs = var_packs(vars, pipe);
-            let body = if packs.is_empty() { " NULL;" } else { &packs };
+            let body = if packs.is_empty() {
+                format!(" plsqlide__pause({stmt});")
+            } else {
+                format!(" {packs} plsqlide__pause({stmt});")
+            };
             line.push_str(&format!(
                 " IF plsqlide__dbg({stmt}) = 1 THEN{body} END IF;"
             ));
@@ -367,10 +381,12 @@ mod tests {
         let out = instrument(src, "P");
         assert_eq!(out.lines().count(), src.lines().count());
         assert!(out.contains("IF plsqlide__dbg(4) = 1 THEN"));
+        assert!(out.contains("plsqlide__pause(4);"));
         assert!(out.contains("IF plsqlide__dbg(5) = 1 THEN"));
         assert!(out.contains("IF plsqlide__dbg(6) = 1 THEN"));
         // variable values are packed at call sites and sent as a message
         assert!(out.contains("m := 'V V_X='"));
+        assert!(out.contains("plsqlide__pause("));
         // stub is the last declaration, right before BEGIN
         assert!(out.lines().nth(1).unwrap().trim_end().ends_with("END;"));
     }
@@ -394,6 +410,7 @@ mod tests {
         assert!(out.contains("IF plsqlide__dbg(2) = 1 THEN"));
         assert!(out.contains("IF plsqlide__dbg(3) = 1 THEN"));
         assert!(out.contains("IF plsqlide__dbg(4) = 1 THEN"));
+        assert!(out.contains("plsqlide__pause(4);"));
         // the string's inner semicolon must not create a phantom stop
         let line2 = out.lines().nth(1).unwrap();
         assert_eq!(line2.matches("plsqlide__dbg").count(), 1);

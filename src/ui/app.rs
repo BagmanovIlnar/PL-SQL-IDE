@@ -370,6 +370,8 @@ struct App {
     /// Selectable/copyable view of `error_modal` for the text_editor widget.
     error_content: Content,
     connect_error_content: Content,
+    /// Open details dialog for a debug variable: (name, selectable value).
+    var_details: Option<(String, Content)>,
     dialog: Option<ConnectionDraft>,
     dialog_error: Option<String>,
     /// Sidebar group names in display order (persisted in connections.json).
@@ -454,6 +456,11 @@ enum Message {
         connection_id: ConnectionId,
     },
     DismissErrorModal,
+    /// Show a debug variable's full value in a details dialog.
+    VarDetails(String, String),
+    /// Selection/scroll inside the variable-details dialog.
+    VarDetailsAction(Action),
+    CloseVarDetails,
     SelectTab(usize),
     CloseTab(usize),
     /// Save the pending tab, then close it.
@@ -593,6 +600,7 @@ impl App {
             debug_session: DebugSession::default(),
             error_content: Content::new(),
             connect_error_content: Content::new(),
+            var_details: None,
             debug_system: oracle_debugger_prefs::load().default_debug_system,
             close_confirm: None,
         }
@@ -1091,8 +1099,27 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             // Read-only: apply selection/scroll, ignore text edits.
             if !matches!(action, Action::Edit(_)) {
                 app.error_content.perform(action.clone());
-                app.connect_error_content.perform(action);
+                app.connect_error_content.perform(action.clone());
+                if let Some((_, content)) = &mut app.var_details {
+                    content.perform(action);
+                }
             }
+            Task::none()
+        }
+        Message::VarDetails(name, value) => {
+            app.var_details = Some((name, Content::with_text(&value)));
+            Task::none()
+        }
+        Message::VarDetailsAction(action) => {
+            if !matches!(action, Action::Edit(_)) {
+                if let Some((_, content)) = &mut app.var_details {
+                    content.perform(action);
+                }
+            }
+            Task::none()
+        }
+        Message::CloseVarDetails => {
+            app.var_details = None;
             Task::none()
         }
         Message::EditorAction(action) => {
@@ -2627,6 +2654,11 @@ fn view(app: &App) -> Element<'_, Message> {
             .into()
     } else if app.group_draft.is_some() {
         stack![base, group_name_modal(app)]
+            .width(Fill)
+            .height(Fill)
+            .into()
+    } else if app.var_details.is_some() {
+        stack![base, var_details_modal(app)]
             .width(Fill)
             .height(Fill)
             .into()
@@ -4500,7 +4532,7 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
                 debug_list_view(lines, app.parameters_height).into()
             }
             BottomTab::Variables => {
-                debug_list_view(app.debug_session.variables.clone(), app.parameters_height).into()
+                debug_vars_view(app.debug_session.variables.clone(), app.parameters_height).into()
             }
         };
         column![
@@ -4535,6 +4567,112 @@ fn debug_list_view(lines: Vec<String>, height: f32) -> Element<'static, Message>
         col = col.push(text(line).size(12).font(Font::MONOSPACE));
     }
     scrollable(col).height(height).width(Fill).into()
+}
+
+/// Grid of declared variables at the current pause: Name | Value (with an
+/// ellipsis button opening the full-value dialog). Scrollable in both axes.
+fn debug_vars_view(
+    variables: Vec<String>,
+    height: f32,
+) -> Element<'static, Message> {
+    use iced::widget::text_input;
+    if variables.is_empty() {
+        return container(
+            scrollable(text(i18n::t("debug.list_empty")).size(12).color(ui_theme::current().muted))
+                .height(Fill)
+                .width(Fill),
+        )
+        .height(height)
+        .width(Fill)
+        .into();
+    }
+    let head = row![
+        container(text("Имя").size(11).color(ui_theme::current().muted)).width(160),
+        container(text("Значение").size(11).color(ui_theme::current().muted)).width(Fill),
+        container(text("").size(11)).width(30),
+    ]
+    .spacing(4)
+    .padding(Padding::from([4, 10]));
+    let mut col = column![head].spacing(2);
+    for line in variables {
+        let (name, value) = match line.split_once(" = ") {
+            Some(pair) => pair,
+            None => (line.as_str(), ""),
+        };
+        col = col.push(
+            row![
+                container(text(name.to_string()).size(12).font(Font::MONOSPACE)).width(160),
+                text_input("", value)
+                    .padding(2)
+                    .size(12)
+                    .font(Font::MONOSPACE)
+                    .width(Fill),
+                button(text("...").size(11).font(Font::MONOSPACE))
+                    .padding(Padding::from([2, 8]))
+                    .style(|_, status| ui_theme::chrome_button(status))
+                    .on_press(Message::VarDetails(
+                        name.to_string(),
+                        value.to_string(),
+                    )),
+            ]
+            .spacing(4)
+            .padding(Padding::from([0, 10])),
+        );
+    }
+    container(scrollable(col).height(Fill).width(Fill))
+        .height(height)
+        .width(Fill)
+        .into()
+}
+
+/// Full-value dialog for a debug variable (selectable/copyable).
+fn var_details_modal(app: &App) -> Element<'_, Message> {
+    use iced::widget::text_editor;
+    let Some((name, content)) = &app.var_details else {
+        return column![].into();
+    };
+    let form = column![
+        text(name.clone()).size(16),
+        text_editor(content)
+            .height(160)
+            .width(520)
+            .size(13)
+            .font(Font::MONOSPACE)
+            .on_action(Message::VarDetailsAction)
+            .style(|_, status| editor_style(status)),
+        row![
+            Space::new().width(Fill),
+            button(text(i18n::t("dialog.connect_failed.ok")).size(13))
+                .padding(Padding::from([8, 16]))
+                .style(|_, status| ui_theme::primary_button(status))
+                .on_press(Message::CloseVarDetails),
+        ],
+    ]
+    .spacing(12)
+    .padding(20)
+    .width(560);
+
+    let card = container(form).style(|_| ui_theme::modal_card());
+    let backdrop = mouse_area(
+        container(Space::new().width(Fill).height(Fill))
+            .width(Fill)
+            .height(Fill)
+            .style(|_| ui_theme::modal_backdrop()),
+    )
+    .on_press(Message::CloseVarDetails);
+
+    opaque(
+        stack![
+            backdrop,
+            opaque(container(card)
+                .width(Fill)
+                .height(Fill)
+                .center_x(Fill)
+                .center_y(Fill)),
+        ]
+        .width(Fill)
+        .height(Fill),
+    )
 }
 
 /// Tab strip of the bottom panel (Parameters / Results).
