@@ -1220,8 +1220,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     }
                 }
                 other => {
+                    tracing::info!(target: "command", action = ?other, "console mouse/scroll action");
                     if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                         sheet.command_dialog_view.perform(other);
+                        let cursor = sheet.command_dialog_view.cursor();
+                        tracing::info!(target: "command", selected = cursor.selection.is_some(), "selection state after action");
                     }
                 }
             }
@@ -5640,11 +5643,17 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             .font(Font::MONOSPACE)
             .width(Fill)
             .style(|_, _| console_input_style());
-        // v3 look: history, then the inline SQL> prompt after it. Typing
-        // (even with focus in the history) scrolls the prompt into view.
-        scrollable(
-            column![
-                history,
+        // History scrolls and is selectable; the SQL> input row is FIXED
+        // below the scroll — it cannot be scrolled out of sight, so typed
+        // text is always on screen (fixes "поле пропадает").
+        column![
+            scrollable(column![history].padding(Padding::from([6, 8])))
+                .id(iced::widget::Id::new("command-console"))
+                .height(Fill)
+                .direction(both_scroll())
+                .style(|_, _| plain_scroll_style()),
+            rule::horizontal(1).style(|_| rule_style()),
+            container(
                 row![
                     text("SQL> ")
                         .size(12)
@@ -5653,15 +5662,14 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
                     input,
                 ]
                 .spacing(0)
-                .align_y(Vertical::Center),
-            ]
-            .spacing(0)
-            .padding(Padding::from([6, 8])),
-        )
-        .id(iced::widget::Id::new("command-console"))
+                .align_y(Vertical::Center)
+            )
+            .padding(Padding::from([4, 8]))
+            .width(Fill),
+        ]
+        .spacing(0)
         .height(Fill)
-        .direction(both_scroll())
-        .style(|_, _| plain_scroll_style())
+        .width(Fill)
         .into()
     };
 
