@@ -211,11 +211,12 @@ pub async fn run_postgres_spike(request: PostgresSpikeRequest) -> CoreResult<Pos
                 Ok(_) => row
                     .try_get::<String, _>(index)
                     .ok()
-                    .or_else(|| {
-                        row.try_get::<i64, _>(index)
-                            .ok()
-                            .map(|number| number.to_string())
-                    })
+                    .or_else(|| row.try_get::<i64, _>(index).ok().map(|v| v.to_string()))
+                    .or_else(|| row.try_get::<i32, _>(index).ok().map(|v| v.to_string()))
+                    .or_else(|| row.try_get::<i16, _>(index).ok().map(|v| v.to_string()))
+                    .or_else(|| row.try_get::<f64, _>(index).ok().map(|v| v.to_string()))
+                    .or_else(|| row.try_get::<f32, _>(index).ok().map(|v| v.to_string()))
+                    .or_else(|| row.try_get::<bool, _>(index).ok().map(|v| v.to_string()))
                     .unwrap_or_else(|| "<unprintable>".to_string()),
                 Err(_) => "<unprintable>".to_string(),
             };
