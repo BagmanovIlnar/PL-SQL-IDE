@@ -178,9 +178,6 @@ struct Worksheet {
     command_edit: bool,
     /// Command window dialog: accumulated "SQL> …" history with output.
     command_dialog: String,
-    /// Selectable text_editor view of `command_dialog`; rebuilt on append
-    /// (selection is lost only when output arrives, not while typing).
-    command_dialog_view: Content,
     /// Output held back while paused; flushed into the dialog on resume.
     command_pending: String,
     /// Command window: execution paused (dialog updates held back).
@@ -485,8 +482,6 @@ enum Message {
     EditorThumbRelease,
     /// Copy a modal's error text to the clipboard.
     CopyError(String),
-    /// Selection/scroll on the read-only console output (edits ignored).
-    ConsoleAction(Action),
     FilterChanged(String),
     /// Toggle “Only current user” in the Objects panel.
     ToggleCurrentUserOnly(bool),
@@ -740,7 +735,6 @@ impl App {
             dirty: false,
             command_edit: false,
             command_dialog: String::new(),
-            command_dialog_view: Content::new(),
             command_pending: String::new(),
             command_paused: false,
             command_input: String::new(),
@@ -1185,15 +1179,6 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
-        Message::ConsoleAction(action) => {
-            // Console output is read-only: allow selection/scroll, ignore edits.
-            if !matches!(action, Action::Edit(_)) {
-                if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                    sheet.command_dialog_view.perform(action);
-                }
-            }
-            Task::none()
-        }
         Message::VarDetails(name, value) => {
             app.var_details = Some((name, value));
             Task::none()
@@ -5237,10 +5222,9 @@ fn console_expand_tabs(value: &str) -> String {
     value.replace('\t', "    ")
 }
 
-/// Appends console text and rebuilds the selectable text_editor view.
+/// Appends console text to the dialog history.
 fn dialog_push(sheet: &mut Worksheet, value: &str) {
     sheet.command_dialog.push_str(value);
-    sheet.command_dialog_view = Content::with_text(&sheet.command_dialog);
 }
 
 /// SQL*Plus terminators: a lone `/` line means "run" and a trailing `;` after
@@ -5408,17 +5392,6 @@ fn console_input_style() -> iced::widget::text_input::Style {
     }
 }
 
-/// Same look as the console text: transparent, no borders.
-fn console_editor_style(_status: text_editor::Status) -> text_editor::Style {
-    text_editor::Style {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border::default(),
-        placeholder: ui_theme::current().muted,
-        value: ui_theme::current().text,
-        selection: ui_theme::current().accent,
-    }
-}
-
 /// Command window (like PL/SQL Developer): Execute / Pause / Stop buttons
 /// above an inner tabsheet with the Dialog (interactive console session)
 /// and Edit tabs.
@@ -5459,14 +5432,26 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
         app.busy,
         Message::MenuStop,
     );
-    let bar = container(row![exec, pause, stop].spacing(6).align_y(Vertical::Center))
-        .padding(Padding::from([4, 10]))
-        .width(Fill)
-        .style(|_| container::Style {
-            background: Some(Background::Color(ui_theme::current().ribbon_body_bg)),
-            text_color: Some(ui_theme::current().text),
-            ..container::Style::default()
-        });
+    // Copy the whole dialog (commands + results) — the plain-text console is
+    // not mouse-selectable, this is the copy path.
+    let copy = toolbar_icon_button(
+        text("⧉").size(13),
+        i18n::t("dialog.copy"),
+        dialog.is_empty(),
+        Message::CopyError(dialog.clone()),
+    );
+    let bar = container(
+        row![exec, pause, stop, copy]
+            .spacing(6)
+            .align_y(Vertical::Center),
+    )
+    .padding(Padding::from([4, 10]))
+    .width(Fill)
+    .style(|_| container::Style {
+        background: Some(Background::Color(ui_theme::current().ribbon_body_bg)),
+        text_color: Some(ui_theme::current().text),
+        ..container::Style::default()
+    });
 
     let tab_button = |label: String, active: bool, message: Message| -> Element<'a, Message> {
         button(text(label).size(11))
@@ -5506,14 +5491,12 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             })
             .unwrap_or(false);
         let history: Element<'a, Message> = if !dialog.is_empty() {
-            // Selectable console: read-only editor (mouse selection + Cmd+C),
-            // no wrapping — scrollbars come from the outer scrollable.
-            text_editor(&sheet.command_dialog_view)
+            // Plain text: clicks and keys never get stolen from the SQL>
+            // input; the whole dialog is copyable via the toolbar button.
+            text(dialog)
                 .size(12)
                 .font(Font::MONOSPACE)
                 .wrapping(iced::widget::text::Wrapping::None)
-                .on_action(Message::ConsoleAction)
-                .style(|_, status| console_editor_style(status))
                 .into()
         } else if let Some(p) = profile.filter(|_| connected) {
             text(command_banner_for(p))
