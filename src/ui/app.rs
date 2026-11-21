@@ -518,6 +518,8 @@ enum Message {
     GroupDialogCancel,
     /// Attempt to open a live session for the selected Connections profile.
     ConnectSelected,
+    /// Disconnect the selected connection (drop pooled sessions).
+    DisconnectSelected,
     /// Async result of a Connect attempt for `ConnectionId`.
     ConnectFinished(ConnectionId, Result<(), String>),
     /// Persistent Oracle session opened in background after Connect.
@@ -1565,6 +1567,21 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::ConnectSelected => run_connect(app),
+        Message::DisconnectSelected => {
+            let Some(id) = app.selected_connection else {
+                return Task::none();
+            };
+            if !app.selected_is_connected() {
+                return Task::none();
+            }
+            oracle_pool::close(id);
+            app.connection_status.insert(id, ConnectionStatus::Unknown);
+            app.clear_object_browser();
+            if let Some(name) = app.selected_profile().map(|p| p.name.clone()) {
+                app.metrics = i18n::t_args("status.disconnected", &[("name", name.as_str())]);
+            }
+            Task::none()
+        }
         Message::PoolOpened(id, result) => {
             if let Err(err) = result {
                 app.last_output = format!("Connected, but persistent Oracle session failed: {err}");
@@ -3180,8 +3197,16 @@ fn side_browser(app: &App) -> Element<'_, Message> {
                 ),
                 dock_icon_button(
                     plug().size(14),
-                    i18n::t("connections.connect"),
-                    Message::ConnectSelected
+                    if app.selected_is_connected() {
+                        i18n::t("connections.disconnect")
+                    } else {
+                        i18n::t("connections.connect")
+                    },
+                    if app.selected_is_connected() {
+                        Message::DisconnectSelected
+                    } else {
+                        Message::ConnectSelected
+                    },
                 ),
             ]
             .spacing(4)
