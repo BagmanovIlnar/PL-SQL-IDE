@@ -5657,6 +5657,8 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
                         .color(ui_theme::current().accent),
                     input,
                 ]
+                .spacing(0)
+                .width(Fill)
                 .align_y(Vertical::Center),
             ]
             .spacing(0)
