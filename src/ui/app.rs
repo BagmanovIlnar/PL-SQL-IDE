@@ -5526,25 +5526,27 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             .font(Font::MONOSPACE)
             .width(Fill)
             .style(|_, _| console_input_style());
-        scrollable(
-            column![
-                history,
-                row![
-                    text("SQL> ")
-                        .size(12)
-                        .font(Font::MONOSPACE)
-                        .color(ui_theme::current().accent),
-                    input,
-                ]
-                .align_y(Vertical::Center),
+        let console = scrollable(history)
+            .id(iced::widget::Id::new("command-console"))
+            .height(Fill)
+            .direction(both_scroll())
+            .style(|_, _| plain_scroll_style());
+        // Terminal style: history scrolls, the SQL> prompt is pinned to the
+        // bottom of the pane — it can never scroll out of view.
+        column![
+            console,
+            rule::horizontal(1).style(|_| rule_style()),
+            row![
+                text("SQL> ")
+                    .size(12)
+                    .font(Font::MONOSPACE)
+                    .color(ui_theme::current().accent),
+                input,
             ]
-            .spacing(0)
-            .padding(Padding::from([6, 8])),
-        )
-        .id(iced::widget::Id::new("command-console"))
+            .align_y(Vertical::Center)
+            .padding(Padding::from([4, 8])),
+        ]
         .height(Fill)
-        .direction(both_scroll())
-        .style(|_, _| plain_scroll_style())
         .into()
     };
 
