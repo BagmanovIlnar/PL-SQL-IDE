@@ -5544,6 +5544,9 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             text_editor(&sheet.command_dialog_view)
                 .size(12)
                 .font(Font::MONOSPACE)
+                // Default height is Fill, which collapses to zero inside a
+                // scrollable — size to content like the old `text` did.
+                .height(iced::Length::Shrink)
                 .wrapping(iced::widget::text::Wrapping::None)
                 .on_action(Message::ConsoleAction)
                 .style(|_, status| console_editor_style(status))
