@@ -1164,6 +1164,19 @@ impl App {
 }
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
+    let started = std::time::Instant::now();
+    let task = update_inner(app, message);
+    let elapsed = started.elapsed();
+    if elapsed >= std::time::Duration::from_millis(50) {
+        tracing::warn!(
+            elapsed_ms = elapsed.as_millis() as u64,
+            "update: slow handler"
+        );
+    }
+    task
+}
+
+fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
         Message::VarDetails(name, value) => {
@@ -2898,6 +2911,16 @@ fn run_result_post(app: &mut App) -> Task<Message> {
 }
 
 fn view(app: &App) -> Element<'_, Message> {
+    let started = std::time::Instant::now();
+    let tree = view_inner(app);
+    let elapsed = started.elapsed();
+    if elapsed >= std::time::Duration::from_millis(50) {
+        tracing::warn!(elapsed_ms = elapsed.as_millis() as u64, "view: slow frame");
+    }
+    tree
+}
+
+fn view_inner(app: &App) -> Element<'_, Message> {
     // Keep style helpers in sync with the selected preference every frame
     // (System may follow OS changes while the app is open).
     ui_theme::apply(app.theme_mode);
