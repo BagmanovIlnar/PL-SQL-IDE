@@ -3976,18 +3976,10 @@ fn worksheet_tabs(app: &App) -> Element<'_, Message> {
         tabs = tabs.push(row![tab, close].spacing(0));
     }
 
-    container(
-        row![
-            tabs,
-            Space::new().width(Fill),
-            text(&app.metrics).size(12).color(ui_theme::current().muted),
-        ]
-        .align_y(Vertical::Center)
-        .padding(Padding::from([4, 8])),
-    )
-    .width(Fill)
-    .style(|_| chrome_style())
-    .into()
+    container(tabs)
+        .width(Fill)
+        .style(|_| chrome_style())
+        .into()
 }
 
 /// Full work-area placeholder when no worksheets are open.
