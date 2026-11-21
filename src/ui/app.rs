@@ -1477,7 +1477,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     sheet.command_last.clone()
                 } else {
                     sheet.command_last = raw.clone();
-                    raw
+                    raw.clone()
                 };
                 if sheet.command_dialog.is_empty() {
                     sheet.command_dialog.push_str(&banner);
