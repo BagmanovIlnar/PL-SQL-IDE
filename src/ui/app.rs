@@ -3156,7 +3156,11 @@ fn side_browser(app: &App) -> Element<'_, Message> {
         list = list.push(group_header(app, group));
         if !app.collapsed_groups.contains(group) {
             for profile in app.connections.iter().filter(|p| &p.group == group) {
-                list = list.push(connection_row(app, profile));
+                // Indent group members so nesting is visible.
+                list = list.push(container(connection_row(app, profile)).padding(Padding {
+                    left: 16.0,
+                    ..Padding::ZERO
+                }));
             }
         }
     }
