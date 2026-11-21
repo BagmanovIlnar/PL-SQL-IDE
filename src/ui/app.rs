@@ -432,6 +432,8 @@ struct App {
 #[derive(Debug, Clone)]
 enum Message {
     EditorAction(Action),
+    /// Any action on a modal's read-only error text: undo the edit, keep selection.
+    ModalErrorAction(Action),
     FilterChanged(String),
     /// Toggle “Only current user” in the Objects panel.
     ToggleCurrentUserOnly(bool),
@@ -1083,6 +1085,16 @@ impl App {
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
+        Message::ModalErrorAction(_) => {
+            // Read-only: rebuild the content from the stored text on every edit.
+            if let Some(text) = app.error_modal.clone() {
+                app.error_content = Content::with_text(&text);
+            }
+            if let Some(text) = app.connect_error.clone() {
+                app.connect_error_content = Content::with_text(&text);
+            }
+            Task::none()
+        }
         Message::EditorAction(action) => {
             if let Action::Scroll { lines } = &action {
                 if let Some(scroll_y) = app.active_scroll_y_mut() {
@@ -3367,6 +3379,7 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
             .height(200)
             .width(520)
             .size(13)
+            .on_action(Message::ModalErrorAction)
             .style(|_, status| editor_style(status)),
         row![
             Space::new().width(Fill),
@@ -3419,6 +3432,7 @@ fn error_modal(app: &App) -> Element<'_, Message> {
             .width(520)
             .size(13)
             .font(Font::MONOSPACE)
+            .on_action(Message::ModalErrorAction)
             .style(|_, status| editor_style(status)),
         row![
             Space::new().width(Fill),
