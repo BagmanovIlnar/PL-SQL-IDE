@@ -3186,20 +3186,22 @@ fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Me
         ConnectionStatus::Failed => label_text.color(ui_theme::error()),
         ConnectionStatus::Unknown => label_text,
     };
-    let body: Element<'static, Message> = if app.connecting == Some(id) {
-        // Spinner animation to the left of the name while connecting.
-        row![
-            text(CONNECT_SPINNER[app.connect_frame % CONNECT_SPINNER.len()])
-                .size(12)
-                .color(ui_theme::current().accent),
-            label_text,
-        ]
-        .spacing(6)
-        .align_y(Vertical::Center)
-        .into()
+    // Fixed-width spinner slot keeps the label from shifting when the
+    // animation appears/disappears.
+    let spinner = if app.connecting == Some(id) {
+        CONNECT_SPINNER[app.connect_frame % CONNECT_SPINNER.len()]
     } else {
-        label_text.into()
+        ' '
     };
+    let body: Element<'static, Message> = row![
+        container(text(spinner).size(12).color(ui_theme::current().accent))
+            .width(14)
+            .center_x(14),
+        label_text,
+    ]
+    .spacing(4)
+    .align_y(Vertical::Center)
+    .into();
     button(container(body).width(Fill).align_x(Horizontal::Left))
         .width(Fill)
         .padding(Padding::from([8, 10]))
