@@ -485,6 +485,8 @@ enum Message {
     EditorThumbRelease,
     /// Copy a modal's error text to the clipboard.
     CopyError(String),
+    /// Put keyboard focus on the SQL> input (deferred, post-render).
+    CommandFocus,
     /// Selection/scroll on the read-only console output (edits ignored).
     ConsoleAction(Action),
     FilterChanged(String),
@@ -720,7 +722,7 @@ impl App {
         }
     }
 
-    fn open_window(&mut self, kind: WindowKind) {
+    fn open_window(&mut self, kind: WindowKind) -> Task<Message> {
         let connection_id = self.selected_connection;
         let connection_label = connection_id
             .and_then(|id| self.connections.iter().find(|item| item.id == id))
@@ -758,6 +760,13 @@ impl App {
                 ("connection", connection_label.as_str()),
             ],
         );
+        if kind == WindowKind::Command {
+            // Deferred one cycle: the input exists only after this cycle's
+            // view build — focusing immediately would miss the fresh widget.
+            Task::perform(async {}, |_| Message::CommandFocus)
+        } else {
+            Task::none()
+        }
     }
 
     /// Removes a worksheet tab and fixes `active_tab` (may leave the workspace empty).
@@ -1185,6 +1194,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
+        Message::CommandFocus => focus_command_input(),
         Message::ConsoleAction(action) => {
             // Console output is read-only: selection/scroll apply, edits drop.
             let clicked = matches!(action, Action::Click(_));
@@ -1444,10 +1454,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.close_confirm = None;
             Task::none()
         }
-        Message::MenuNew(kind) => {
-            app.open_window(kind);
-            Task::none()
-        }
+        Message::MenuNew(kind) => app.open_window(kind),
         Message::MenuOpenStub(label) => {
             app.metrics = i18n::t_args("status.open_stub", &[("label", label.as_str())]);
             Task::none()
