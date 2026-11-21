@@ -150,6 +150,8 @@ struct SpikePayload {
     output: String,
     columns: Vec<String>,
     rows: Vec<Vec<String>>,
+    /// Postgres RAISE NOTICE lines; Oracle DBMS_OUTPUT later.
+    notices: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -1951,17 +1953,26 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.last_output = payload.output;
                     if let Some(echo) = app.command_echo.take() {
                         if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                            // SQL*Plus-style table when the run returned columns;
-                            // raw output otherwise (DBMS_OUTPUT / messages).
-                            let output = if payload.columns.is_empty() {
-                                output
+                            // SQL*Plus-style output for the console: notices first
+                            // (RAISE NOTICE / DBMS_OUTPUT analog), then the table.
+                            // Raw debug text only as a last resort.
+                            let mut console = String::new();
+                            for notice in &payload.notices {
+                                console.push_str("NOTICE: ");
+                                console.push_str(notice);
+                                console.push('\n');
+                            }
+                            if payload.columns.is_empty() {
+                                if console.is_empty() {
+                                    console = output;
+                                }
                             } else {
-                                sqlplus_table(&payload.columns, &payload.rows)
-                            };
+                                console.push_str(&sqlplus_table(&payload.columns, &payload.rows));
+                            }
                             let entry = if echo.is_empty() {
-                                format!("{output}\n\n")
+                                format!("{console}\n\n")
                             } else {
-                                format!("SQL> {}\n{output}\n\n", console_expand_tabs(echo.trim()))
+                                format!("SQL> {}\n{console}\n\n", console_expand_tabs(echo.trim()))
                             };
                             if sheet.command_paused {
                                 sheet.command_pending.push_str(&entry);
@@ -2619,6 +2630,7 @@ fn run_spike_with_sql(
                                 output,
                                 columns: result.columns,
                                 rows: result.rows,
+                                notices: result.notices,
                             }
                         })
                         .map_err(|err| err.to_string())
@@ -2651,6 +2663,7 @@ fn run_spike_with_sql(
                                     output,
                                     columns: result.columns,
                                     rows: result.rows,
+                                    notices: Vec::new(),
                                 }
                             })
                             .map_err(|err| err.to_string())

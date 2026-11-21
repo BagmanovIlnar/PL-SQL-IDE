@@ -1,5 +1,6 @@
 //! PostgreSQL Phase 0 spike: connect, query, cancel and timeout.
 
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -7,8 +8,48 @@ use sqlx::postgres::PgConnectOptions;
 use sqlx::{Column, ConnectOptions, Connection, Executor, PgConnection, Row, ValueRef};
 use tokio::time::timeout;
 use tracing::info;
+use tracing_subscriber::layer;
 
 use super::{CoreError, CoreResult};
+
+/// Server RAISE NOTICE texts captured from sqlx notice events.
+/// ponytail: one global buffer — concurrent spike runs would interleave; runs are sequential today.
+static NOTICES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// tracing layer that records `sqlx::postgres::notice` events (RAISE NOTICE)
+/// into the buffer drained by [`run_postgres_spike`]. Install once at startup:
+/// `tracing_subscriber::fmt().with(notice_capture_layer())…init()`.
+// ponytail: sqlx 0.8 has no on_notice callback — this is the supported hook.
+pub fn notice_capture_layer() -> NoticeCapture {
+    NoticeCapture
+}
+
+pub struct NoticeCapture;
+
+impl<S: tracing::Subscriber> layer::Layer<S> for NoticeCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: layer::Context<'_, S>) {
+        if event.metadata().target() != "sqlx::postgres::notice" {
+            return;
+        }
+        struct Visitor(String);
+        impl tracing::field::Visit for Visitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}").trim_matches('"').to_string();
+                }
+            }
+        }
+        let mut visitor = Visitor(String::new());
+        event.record(&mut visitor);
+        if !visitor.0.is_empty() {
+            NOTICES.lock().unwrap().push(visitor.0);
+        }
+    }
+}
+
+fn take_notices() -> Vec<String> {
+    NOTICES.lock().unwrap().drain(..).collect()
+}
 
 /// Request used by the PostgreSQL spike.
 #[derive(Debug, Clone)]
@@ -29,6 +70,8 @@ pub struct PostgresSpikeResult {
     pub elapsed_ms: u64,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    /// RAISE NOTICE texts captured during the run (psql-style client output).
+    pub notices: Vec<String>,
     pub message: String,
 }
 
@@ -46,16 +89,23 @@ impl PostgresSpikeResult {
     ///     elapsed_ms: 12,
     ///     columns: vec!["v".into()],
     ///     rows: vec![vec!["1".into()]],
+    ///     notices: Vec::new(),
     ///     message: "ok".into(),
     /// }
     /// .format_for_ui();
     /// assert!(text.contains("connected=true"));
     /// ```
     pub fn format_for_ui(&self) -> String {
-        let mut out = format!(
+        let mut out = String::new();
+        for notice in &self.notices {
+            out.push_str("NOTICE: ");
+            out.push_str(notice);
+            out.push('\n');
+        }
+        out.push_str(&format!(
             "connected={}\ncancelled={}\nelapsed_ms={}\nmessage={}",
             self.connected, self.cancelled, self.elapsed_ms, self.message
-        );
+        ));
         if !self.columns.is_empty() {
             out.push_str("\n\n");
             out.push_str(&self.columns.join(" | "));
@@ -120,6 +170,7 @@ pub async fn run_postgres_spike(request: PostgresSpikeRequest) -> CoreResult<Pos
             elapsed_ms: started.elapsed().as_millis() as u64,
             columns: Vec::new(),
             rows: Vec::new(),
+            notices: take_notices(),
             message: if cancelled {
                 "long query cancelled successfully".into()
             } else {
@@ -181,6 +232,7 @@ pub async fn run_postgres_spike(request: PostgresSpikeRequest) -> CoreResult<Pos
         elapsed_ms: started.elapsed().as_millis() as u64,
         columns,
         rows: values,
+        notices: take_notices(),
         message: "query completed".into(),
     })
 }
