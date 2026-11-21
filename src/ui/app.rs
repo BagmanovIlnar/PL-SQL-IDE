@@ -5416,8 +5416,15 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
         let profile = sheet
             .connection_id
             .and_then(|id| app.connections.iter().find(|p| p.id == id));
+        // Oracle keeps a persistent pool; Postgres connects per-run, so its
+        // state lives in connection_status.
         let connected = profile
-            .map(|p| oracle_pool::has_target(p.id))
+            .map(|p| match p.db_kind {
+                DbKind::Oracle => oracle_pool::has_target(p.id),
+                DbKind::Postgres => {
+                    app.connection_status.get(&p.id) == Some(&ConnectionStatus::Connected)
+                }
+            })
             .unwrap_or(false);
         let history: Element<'a, Message> = if !dialog.is_empty() {
             text(dialog)
