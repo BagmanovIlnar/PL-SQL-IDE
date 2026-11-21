@@ -2540,8 +2540,21 @@ fn run_spike_with_sql(
     app.metrics = i18n::t_args("status.executing", &[("name", profile.name.as_str())]);
     app.last_output = i18n::t("status.running");
 
-    let sql = sql_override.or_else(|| app.active_content().map(|content| content.text()));
-    let sql_text = sql.clone().unwrap_or_default();
+    let raw_sql = sql_override.or_else(|| app.active_content().map(|content| content.text()));
+    // Command window: PL/SQL Developer-style terminators — trailing `/` line
+    // and statement `;` are client-side, never sent to the server.
+    let command_window = app
+        .worksheets
+        .get(app.active_tab)
+        .is_some_and(|sheet| sheet.kind == WindowKind::Command);
+    let sql_text = raw_sql.clone().unwrap_or_default();
+    let sql = raw_sql.map(|text| {
+        if command_window {
+            strip_sqlplus_terminators(&text)
+        } else {
+            text
+        }
+    });
     // Command window: remember what we are running to echo it in the Dialog.
     // Submit path pre-sets Some("") (echo already shown) — do not clobber it.
     if app.command_echo.is_none() {
@@ -4557,6 +4570,26 @@ mod sqlplus_table_tests {
     use super::*;
 
     #[test]
+    fn strips_terminators_like_sqlplus() {
+        assert_eq!(
+            strip_sqlplus_terminators("select 1 from dual;\n/\n"),
+            "select 1 from dual"
+        );
+        assert_eq!(
+            strip_sqlplus_terminators("begin null; end;\n/\n"),
+            "begin null; end;"
+        );
+        assert_eq!(
+            strip_sqlplus_terminators("select 1 from dual;"),
+            "select 1 from dual"
+        );
+        assert_eq!(
+            strip_sqlplus_terminators("update t set x = 1\n/"),
+            "update t set x = 1"
+        );
+    }
+
+    #[test]
     fn aligns_columns_and_separator() {
         let out = sqlplus_table(
             &["ID".into(), "NAME".into()],
@@ -5141,6 +5174,31 @@ fn command_banner_for(profile: &ConnectionProfile) -> String {
 /// them to 4 spaces so indentation survives in the console.
 fn console_expand_tabs(value: &str) -> String {
     value.replace('\t', "    ")
+}
+
+/// SQL*Plus terminators: a lone `/` line means "run" and a trailing `;` after
+/// a plain SQL statement is client-side — neither reaches the server.
+/// PL/SQL blocks (declare/begin/create/with…) keep their semicolons.
+// ponytail: block detection by first keyword only; multi-`/` scripts out of scope.
+fn strip_sqlplus_terminators(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    while matches!(lines.last().map(|l: &&str| l.trim()), Some("/") | Some("")) {
+        lines.pop();
+    }
+    let mut out = lines.join("\n");
+    let head = out.trim_start().to_ascii_uppercase();
+    let block = head.starts_with("DECLARE")
+        || head.starts_with("BEGIN")
+        || head.starts_with("CREATE")
+        || head.starts_with("WITH");
+    if !block {
+        out = out
+            .trim_end()
+            .strip_suffix(';')
+            .map(str::to_string)
+            .unwrap_or(out);
+    }
+    out
 }
 
 /// SQL*Plus-style table: columns padded to content width, `---` under the
