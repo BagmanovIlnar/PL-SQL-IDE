@@ -1775,7 +1775,6 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     }
                 }
                 Err(error) => {
-                    app.last_output = error.clone();
                     show_error_modal(app, error);
                     app.metrics = i18n::t("status.execute_failed");
                 }
@@ -1799,7 +1798,6 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     }
                 }
                 Err(error) => {
-                    app.last_output = error.clone();
                     show_error_modal(app, error);
                     app.metrics = i18n::t("status.execute_failed");
                 }
@@ -1921,9 +1919,14 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.debug_session.current_line = event
                         .current_line
                         .map(|l| l.saturating_sub(app.debug_session.bind_offset).max(1));
-                    app.metrics = event.status.clone();
+                    // Errors go to the modal only — the status bar used to
+                    // duplicate the same text and jumped around on
+                    // multi-line ORA- stacks.
                     if event.status.starts_with("block failed") {
+                        app.metrics = i18n::t("debug.failed");
                         show_error_modal(app, event.message.clone());
+                    } else {
+                        app.metrics = event.status.clone();
                     }
                     // Bind-parameter OUT values came back with the finished
                     // event — write them into the parameters panel.
@@ -1952,20 +1955,21 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                             }
                         }
                     }
-                    let mut out = event.message;
-                    if !event.log.is_empty() {
-                        out.push('\n');
-                        out.push_str(&event.log.join("\n"));
+                    if !event.status.starts_with("block failed") {
+                        let mut out = event.message;
+                        if !event.log.is_empty() {
+                            out.push('\n');
+                            out.push_str(&event.log.join("\n"));
+                        }
+                        if !event.variables.is_empty() {
+                            out.push_str("\n--- variables ---\n");
+                            out.push_str(&event.variables.join("\n"));
+                        }
+                        app.last_output = out;
                     }
-                    if !event.variables.is_empty() {
-                        out.push_str("\n--- variables ---\n");
-                        out.push_str(&event.variables.join("\n"));
-                    }
-                    app.last_output = out;
                 }
                 Err(err) => {
                     app.metrics = i18n::t("debug.failed");
-                    app.last_output = err.clone();
                     show_error_modal(app, err);
                 }
             }
