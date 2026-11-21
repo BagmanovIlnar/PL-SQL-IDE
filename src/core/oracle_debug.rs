@@ -80,6 +80,10 @@ static SESSION_SOURCE: LazyLock<Mutex<HashMap<ConnectionId, String>>> =
 /// to the next finished event and written back into the parameters panel.
 static BINDOUTS: LazyLock<Mutex<HashMap<ConnectionId, Vec<(String, String)>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Pipe name of the previous debug session per connection — Start tells the
+/// still-dying previous block to STOP and purges its pipes.
+static LAST_PIPE: LazyLock<Mutex<HashMap<ConnectionId, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 #[cfg(feature = "oracle")]
 static JDWP_SESSIONS: LazyLock<Mutex<HashMap<ConnectionId, super::jdwp::JdwpSession>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -1089,10 +1093,35 @@ fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEv
     // Prepare (or reset) the instrumented session: fresh pipe name, state,
     // stale-pipe purge, stage the editor source. Returns the pipe id.
     let start_prep = |request: &DebugEngineRequest| -> CoreResult<String> {
+        // ponytail: unique pipe per session — a still-dying block from the
+        // previous run must not answer the new session (same name + live
+        // thread meant pauses “at the wrong line”). Old pipe gets a STOP and
+        // a purge; a generation-guarded pool would be the full fix.
+        if let Ok(guard) = LAST_PIPE.lock() {
+            if let Some(old) = guard.get(&id).cloned() {
+                let _ = debug_access::with_ctrl_mut(id, |ctrl| {
+                    ctrl.execute(
+                        &format!(
+                            "DECLARE m VARCHAR2(100); BEGIN SYS.DBMS_PIPE.PACK_MESSAGE('STOP'); \
+                             m := SYS.DBMS_PIPE.SEND_MESSAGE('{old}_C'); \
+                             SYS.DBMS_PIPE.PURGE('{old}_E'); \
+                             SYS.DBMS_PIPE.PURGE('{old}_C'); END;"
+                        ),
+                        &[],
+                    )
+                    .map(|_| ())
+                    .map_err(|err| CoreError::Query(err.to_string()))
+                });
+            }
+        }
         let pipe = format!(
-            "PLSQLIDE_DBG_{}",
-            &id.simple().to_string()[..8].to_ascii_uppercase()
+            "PLSQLIDE_DBG_{}{}",
+            &id.simple().to_string()[..8].to_ascii_uppercase(),
+            &uuid::Uuid::new_v4().simple().to_string()[..6].to_ascii_uppercase()
         );
+        if let Ok(mut guard) = LAST_PIPE.lock() {
+            guard.insert(id, pipe.clone());
+        }
         state(Some(pipe.clone()), true)?;
         let _ = debug_access::with_ctrl_mut(id, |ctrl| {
             ctrl.execute(
@@ -1140,7 +1169,9 @@ fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEv
                             ctrl.execute(
                                 &format!(
                                     "DECLARE m VARCHAR2(100); BEGIN SYS.DBMS_PIPE.PACK_MESSAGE('STOP'); \
-                                     m := SYS.DBMS_PIPE.SEND_MESSAGE('{pipe}_C'); END;"
+                                     m := SYS.DBMS_PIPE.SEND_MESSAGE('{pipe}_C'); \
+                                     SYS.DBMS_PIPE.PURGE('{pipe}_E'); \
+                                     SYS.DBMS_PIPE.PURGE('{pipe}_C'); END;"
                                 ),
                                 &[],
                             )
