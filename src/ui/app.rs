@@ -1519,7 +1519,8 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             };
             // Echo is already in the dialog — only the output comes later.
             app.command_echo = Some(String::new());
-            run_spike_with_sql(app, FetchMode::Execute, Some(cmd))
+            let run = run_spike_with_sql(app, FetchMode::Execute, Some(cmd));
+            Task::batch([console_snap_to_bottom(), run])
         }
         Message::MenuPause => {
             let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
@@ -1970,6 +1971,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 return Task::none(); // stale result of a cancelled run
             }
             app.busy = false;
+            let mut console_appended = false;
             match outcome {
                 Ok(payload) => {
                     tracing::info!(
@@ -2006,6 +2008,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                                 sheet.command_pending.push_str(&entry);
                             } else {
                                 dialog_push(sheet, &entry);
+                                console_appended = true;
                             }
                         }
                     }
@@ -2065,6 +2068,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                                 sheet.command_pending.push_str(&entry);
                             } else {
                                 dialog_push(sheet, &entry);
+                                console_appended = true;
                             }
                         }
                     }
@@ -2072,7 +2076,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     app.metrics = i18n::t("status.execute_failed");
                 }
             }
-            Task::none()
+            if console_appended {
+                console_snap_to_bottom()
+            } else {
+                Task::none()
+            }
         }
         Message::PostFinished(run_id, outcome) => {
             if run_id != app.spike_run {
@@ -5318,6 +5326,12 @@ fn sqlplus_table(columns: &[String], rows: &[Vec<String>]) -> String {
     out
 }
 
+/// Scrolls the command console to the bottom so the latest output and the
+/// SQL> prompt stay visible (sticky-bottom console).
+fn console_snap_to_bottom() -> Task<Message> {
+    iced::widget::operation::snap_to_end(iced::widget::Id::new("command-console"))
+}
+
 fn command_banner(app: &App) -> String {
     match app.active_worksheet_profile() {
         Some(p) => command_banner_for(p),
@@ -5527,6 +5541,7 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             .spacing(0)
             .padding(Padding::from([6, 8])),
         )
+        .id(iced::widget::Id::new("command-console"))
         .height(Fill)
         .direction(both_scroll())
         .style(|_, _| plain_scroll_style())
