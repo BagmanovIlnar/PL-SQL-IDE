@@ -147,54 +147,29 @@ fn run_oracle_spike_blocking(
         .to_ascii_uppercase();
     let is_query = head.starts_with("SELECT") || head.starts_with("WITH");
     let (columns, values, message) = if !is_query {
-        // Bind wrapper ran (Test window) — make sure the OUT-capture table
-        // exists in this session before the block inserts into it, then
-        // read the returned values back as a two-column result.
+        // Bind wrapper ran (Test window): the block opened the ref cursor
+        // :PLSQLIDE_OUT with each parameter's final value — read it back.
         let capture = sql.starts_with("DECLARE\nPLSQLIDE_P");
-        // ponytail: OUT capture needs PLSQLIDE_BIND_OUT; on med2dev DDL is gated
-        // (DEV_HELLO + SET_MED_TASK), so probe and strip capture lines if absent.
-        // Upgrade: drop stripping once the table is created for real.
-        let mut out_ready = false;
         if capture {
-            out_ready = fetch_query_rows(
-                &connection,
-                "select count(*) from user_tables where table_name = 'PLSQLIDE_BIND_OUT'",
-                &request,
-            )
-            .ok()
-            .and_then(|(_, rows, _)| {
-                rows.first()
-                    .and_then(|r| r.first().cloned())
-                    .map(|n| n != "0")
-            })
-            .unwrap_or(false);
-            let sql = if out_ready {
-                sql
-            } else {
-                sql.lines()
-                    .filter(|l| !l.contains("PLSQLIDE_BIND_OUT"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            connection
-                .execute(&sql, &[])
+            let mut stmt = connection
+                .statement(&sql)
+                .build()
+                .map_err(|err| CoreError::Query(err.to_string()))?;
+            stmt.execute(&[&None::<oracle::sql_type::RefCursor>])
                 .map_err(|err| CoreError::Query(err.to_string()))?;
             info!("oracle statement executed");
-            if out_ready {
-                let (cols, vals, _) = fetch_query_rows(
-                    &connection,
-                    "select NAME, VAL from plsqlide_bind_out",
-                    &request,
-                )?;
-                (cols, vals, "statement executed".to_string())
-            } else {
-                (
-                    Vec::new(),
-                    Vec::new(),
-                    "statement executed (OUT capture skipped: PLSQLIDE_BIND_OUT table missing)"
-                        .to_string(),
-                )
-            }
+            let mut refcur: oracle::sql_type::RefCursor = stmt
+                .bind_value(1)
+                .map_err(|err| CoreError::Query(err.to_string()))?;
+            let rows = refcur
+                .query()
+                .map_err(|err| CoreError::Query(err.to_string()))?;
+            let (cols, vals, _) = collect_query_rows(rows, &request)?;
+            (
+                cols,
+                vals,
+                "statement executed (parameter values returned)".to_string(),
+            )
         } else {
             connection
                 .execute(&sql, &[])
@@ -228,7 +203,14 @@ fn fetch_query_rows(
         .map_err(|err| CoreError::Query(err.to_string()))?;
 
     info!("oracle query executing");
+    collect_query_rows(rows, &request)
+}
 
+/// Collect result rows up to the page cap into (columns, rows, note).
+fn collect_query_rows(
+    rows: oracle::ResultSet<'_, oracle::Row>,
+    request: &OracleSpikeRequest,
+) -> CoreResult<(Vec<String>, Vec<Vec<String>>, String)> {
     let mut columns = Vec::new();
     let mut values = Vec::new();
 

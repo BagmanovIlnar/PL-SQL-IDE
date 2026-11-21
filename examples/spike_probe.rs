@@ -47,12 +47,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // User's failing case: anonymous block with a bind, full Execute path
     // (auto-filled params + capture wrap), expecting the OUT-skip fallback.
     let src = "DECLARE\n      v_x NUMBER;\nBEGIN\n      :dcdcd := 'dcdcd';\nEND;";
-    let params = plsqlide::ui::parameters::parse_binds(src)
+    let mut params = plsqlide::ui::parameters::parse_binds(src)
         .into_iter()
         .map(|n| plsqlide::ui::parameters::Parameter::new(
             n, plsqlide::ui::parameters::ParamDataType::Oracle(
                 plsqlide::ui::parameters::OracleType::Varchar2)))
         .collect::<Vec<_>>();
+    params[0].value = "vfvf".to_string();
     let (wrapped, _off) = plsqlide::ui::parameters::bind_wrap(src, &params, true);
     println!("\n=== bind block (capture wrapped) ===\n{wrapped}");
     let result = run_oracle_spike(OracleSpikeRequest {

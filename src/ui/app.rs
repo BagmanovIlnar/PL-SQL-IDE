@@ -1704,7 +1704,26 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.last_output = payload.output;
                     app.metrics = i18n::t("status.execute_completed");
                     let mode = app.fetch_mode;
+                    let bind_back = payload.columns.len() == 2
+                        && payload.columns[0].eq_ignore_ascii_case("NAME")
+                        && payload.columns[1].eq_ignore_ascii_case("VAL");
                     if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                        // Bind wrapper returned parameter values: write them
+                        // back into the panel (IN/OUT “reference” semantics).
+                        if bind_back {
+                            for row in &payload.rows {
+                                if let [name, val] = row.as_slice() {
+                                    if let Some(p) = sheet
+                                        .parameters
+                                        .rows
+                                        .iter_mut()
+                                        .find(|p| p.name.to_ascii_uppercase() == name.to_ascii_uppercase())
+                                    {
+                                        p.value = if val == "NULL" { String::new() } else { val.clone() };
+                                    }
+                                }
+                            }
+                        }
                         match mode {
                             FetchMode::Execute => {
                                 if !payload.columns.is_empty() {

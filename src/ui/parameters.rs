@@ -1062,8 +1062,9 @@ fn bind_substitute(source: &str) -> String {
 
 /// Wraps an anonymous block so its `:NAME` binds become PL/SQL variables:
 /// each parameter is declared and IN-initialized from its panel value, and
-/// substituted into the text. With `capture`, the wrapper also inserts the
-/// final values into PLSQLIDE_BIND_OUT so the app can read them back.
+/// substituted into the text. With `capture`, the wrapper opens the bound
+/// ref cursor `:PLSQLIDE_OUT` returning every final value — the app reads
+/// them back and writes them into the panel (IN/OUT “reference” semantics).
 /// Returns the wrapped SQL and the line offset the block body moved down by
 /// (the debugger maps pauses back to editor lines with it).
 pub fn bind_wrap(source: &str, params: &[Parameter], capture: bool) -> (String, usize) {
@@ -1090,13 +1091,20 @@ pub fn bind_wrap(source: &str, params: &[Parameter], capture: bool) -> (String, 
     wrapped.push_str("BEGIN\n");
     wrapped.push_str(&bind_substitute(source));
     if capture {
-        wrapped.push_str("\nDELETE FROM PLSQLIDE_BIND_OUT;\n");
-        for p in params {
-            let name = p.name.to_ascii_uppercase();
-            wrapped.push_str(&format!(
-                "INSERT INTO PLSQLIDE_BIND_OUT VALUES('__OUT__{name}', PLSQLIDE_P_{name});\n"
-            ));
-        }
+        // ponytail: single-row DUAL selects — no table, no DDL, works on gated
+        // DBs (med2dev blocks CREATE without DEV_HELLO/SET_MED_TASK).
+        let arms: Vec<String> = params
+            .iter()
+            .map(|p| {
+                let name = p.name.to_ascii_uppercase();
+                format!(
+                    "SELECT '{name}' AS NAME, TO_CHAR(PLSQLIDE_P_{name}) AS VAL FROM DUAL"
+                )
+            })
+            .collect();
+        wrapped.push_str("\nOPEN :PLSQLIDE_OUT FOR\n");
+        wrapped.push_str(&arms.join("\nUNION ALL\n"));
+        wrapped.push_str(";\n");
     }
     wrapped.push_str("END;\n");
     (wrapped, params.len() + 2)
@@ -1120,7 +1128,7 @@ mod tests {
         assert!(sql.starts_with(
             "DECLARE\nPLSQLIDE_P_TEST VARCHAR2(4000) := NULL;\nBEGIN\nBEGIN\n PLSQLIDE_P_TEST := 'a''b';\nEND;\n"
         ));
-        assert!(sql.contains("INSERT INTO PLSQLIDE_BIND_OUT VALUES('__OUT__TEST', PLSQLIDE_P_TEST);"));
+        assert!(sql.contains("OPEN :PLSQLIDE_OUT FOR\nSELECT 'TEST' AS NAME, TO_CHAR(PLSQLIDE_P_TEST) AS VAL FROM DUAL;"));
         assert_eq!(bind_wrap("BEGIN NULL; END;", &[], true).0, "BEGIN NULL; END;");
     }
 
