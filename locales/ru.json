@@ -365,6 +365,7 @@
         "status.resumed": "Выполнение продолжено",
         "command.dialog": "Диалог",
         "command.edit": "Правка",
-        "command.dialog_empty": "Нет команд"
+        "command.dialog_empty": "Нет команд",
+        "command.not_connected": "Не подключено"
     }
 }

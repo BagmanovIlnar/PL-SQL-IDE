@@ -180,6 +180,10 @@ struct Worksheet {
     command_pending: String,
     /// Command window: execution paused (dialog updates held back).
     command_paused: bool,
+    /// Command window: current text of the `SQL>` input line.
+    command_input: String,
+    /// Command window: last executed command (repeated by `/`).
+    command_last: String,
 }
 
 impl Worksheet {
@@ -539,6 +543,9 @@ enum Message {
     ToggleSidebar,
     /// Command window: select the inner tab (false = Dialog, true = Edit).
     CommandTab(bool),
+    /// Command window: `SQL>` input line changed / submitted (Enter).
+    CommandInput(String),
+    CommandSubmit,
     /// Command window: pause/resume execution (dialog updates held back).
     MenuPause,
     GroupDialogSave,
@@ -734,6 +741,8 @@ impl App {
             command_dialog: String::new(),
             command_pending: String::new(),
             command_paused: false,
+            command_input: String::new(),
+            command_last: String::new(),
         });
         self.active_tab = self.worksheets.len() - 1;
         self.completion.clear();
@@ -1466,6 +1475,44 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::CommandInput(value) => {
+            if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                sheet.command_input = value;
+            }
+            Task::none()
+        }
+        Message::CommandSubmit => {
+            let cmd = {
+                let banner = command_banner(app);
+                let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
+                    return Task::none();
+                };
+                if sheet.kind != WindowKind::Command || app.busy {
+                    return Task::none();
+                }
+                let raw = sheet.command_input.trim().to_string();
+                if raw.is_empty() {
+                    return Task::none();
+                }
+                sheet.command_input.clear();
+                let repeat = raw == "/";
+                // `/` alone repeats the last command (SQL*Plus convention).
+                let cmd = if repeat && !sheet.command_last.is_empty() {
+                    sheet.command_last.clone()
+                } else {
+                    sheet.command_last = raw.clone();
+                    raw
+                };
+                if sheet.command_dialog.is_empty() {
+                    sheet.command_dialog.push_str(&banner);
+                }
+                sheet.command_dialog.push_str(&format!("SQL> {cmd}\n"));
+                cmd
+            };
+            // Echo is already in the dialog — only the output comes later.
+            app.command_echo = Some(String::new());
+            run_spike_with_sql(app, FetchMode::Execute, Some(cmd))
+        }
         Message::MenuPause => {
             let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
                 return Task::none();
@@ -1927,7 +1974,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.last_output = payload.output;
                     if let Some(echo) = app.command_echo.take() {
                         if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                            let entry = format!("SQL> {}\n{output}\n\n", echo.trim());
+                            let entry = if echo.is_empty() {
+                                format!("{output}\n\n")
+                            } else {
+                                format!("SQL> {}\n{output}\n\n", echo.trim())
+                            };
                             if sheet.command_paused {
                                 sheet.command_pending.push_str(&entry);
                             } else {
@@ -1982,7 +2033,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 Err(error) => {
                     if let Some(echo) = app.command_echo.take() {
                         if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                            let entry = format!("SQL> {}\n{error}\n\n", echo.trim());
+                            let entry = if echo.is_empty() {
+                                format!("{error}\n\n")
+                            } else {
+                                format!("SQL> {}\n{error}\n\n", echo.trim())
+                            };
                             if sheet.command_paused {
                                 sheet.command_pending.push_str(&entry);
                             } else {
@@ -2481,6 +2536,14 @@ fn page_select(sql: &str, kind: DbKind, offset: usize, limit: Option<usize>) -> 
 }
 
 fn run_spike(app: &mut App, mode: FetchMode) -> Task<Message> {
+    run_spike_with_sql(app, mode, None)
+}
+
+fn run_spike_with_sql(
+    app: &mut App,
+    mode: FetchMode,
+    sql_override: Option<String>,
+) -> Task<Message> {
     if app.busy {
         return Task::none();
     }
@@ -2495,14 +2558,17 @@ fn run_spike(app: &mut App, mode: FetchMode) -> Task<Message> {
     app.metrics = i18n::t_args("status.executing", &[("name", profile.name.as_str())]);
     app.last_output = i18n::t("status.running");
 
-    let sql = app.active_content().map(|content| content.text());
+    let sql = sql_override.or_else(|| app.active_content().map(|content| content.text()));
     let sql_text = sql.clone().unwrap_or_default();
     // Command window: remember what we are running to echo it in the Dialog.
-    app.command_echo = app
-        .worksheets
-        .get(app.active_tab)
-        .filter(|sheet| sheet.kind == WindowKind::Command)
-        .map(|_| sql_text.clone());
+    // Submit path pre-sets Some("") (echo already shown) — do not clobber it.
+    if app.command_echo.is_none() {
+        app.command_echo = app
+            .worksheets
+            .get(app.active_tab)
+            .filter(|sheet| sheet.kind == WindowKind::Command)
+            .map(|_| sql_text.clone());
+    }
     // Test window: discover `:NAME` binds, auto-fill the parameters panel,
     // and wrap the block so panel values bind IN and OUT values come back.
     let sql = if profile.db_kind == DbKind::Oracle
@@ -4454,7 +4520,9 @@ fn worksheet_toolbar(app: &App) -> Element<'static, Message> {
         Message::MenuStop,
     );
     let bar = match kind {
-        Some(WindowKind::Sql | WindowKind::Command) => row![execute, stop],
+        // Command window renders its own Execute/Pause/Stop bar — no duplicate.
+        Some(WindowKind::Command) => return Space::new().width(0).height(0).into(),
+        Some(WindowKind::Sql) => row![execute, stop],
         // Test and code windows: debug controls only — no script buttons.
         _ => row![debug],
     };
@@ -5048,8 +5116,33 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
     editor
 }
 
+/// Console banner shown once at the top of an empty Command-window dialog.
+// ponytail: banner from profile metadata; query v$version for the exact
+// "…Enterprise Edition Release …" wording when it matters.
+fn command_banner(app: &App) -> String {
+    match app.active_worksheet_profile() {
+        Some(p) if p.db_kind == DbKind::Oracle => format!(
+            "Connected to Oracle Database — {}@{}:{}/{}\n\n",
+            p.username, p.host, p.port, p.database
+        ),
+        Some(p) => format!(
+            "Connected to {} — {}@{}:{}/{}\n\n",
+            match p.db_kind {
+                DbKind::Postgres => "PostgreSQL",
+                _ => "Database",
+            },
+            p.username,
+            p.host,
+            p.port,
+            p.database
+        ),
+        None => format!("{}\n\n", i18n::t("command.not_connected")),
+    }
+}
+
 /// Command window (like PL/SQL Developer): Execute / Pause / Stop buttons
-/// above an inner tabsheet with the Dialog (session history) and Edit tabs.
+/// above an inner tabsheet with the Dialog (interactive console session)
+/// and Edit tabs.
 fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, Message> {
     let Some(sheet) = app.worksheets.get(app.active_tab) else {
         return editor;
@@ -5115,17 +5208,38 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
     .padding(Padding::from([4, 10]))
     .align_y(Vertical::Center);
 
-    let body: Element<'_, Message> = if edit_tab {
+    let body: Element<'a, Message> = if edit_tab {
         editor
     } else {
-        scrollable(
-            text(if dialog.is_empty() {
-                i18n::t("command.dialog_empty")
-            } else {
-                dialog
-            })
+        let input = text_input("", &sheet.command_input)
+            .on_input(Message::CommandInput)
+            .on_submit(Message::CommandSubmit)
             .size(12)
-            .font(Font::MONOSPACE),
+            .font(Font::MONOSPACE)
+            .width(Fill);
+        let history: Element<'a, Message> = if dialog.is_empty() {
+            text(i18n::t("command.dialog_empty"))
+                .size(12)
+                .color(ui_theme::current().muted)
+                .into()
+        } else {
+            text(dialog).size(12).font(Font::MONOSPACE).into()
+        };
+        scrollable(
+            column![
+                history,
+                row![
+                    text("SQL> ")
+                        .size(12)
+                        .font(Font::MONOSPACE)
+                        .color(ui_theme::current().accent),
+                    input,
+                ]
+                .align_y(Vertical::Center)
+                .spacing(4),
+            ]
+            .spacing(8)
+            .padding(Padding::from([6, 8])),
         )
         .height(Fill)
         .into()

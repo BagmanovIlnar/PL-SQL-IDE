@@ -171,7 +171,7 @@ impl WindowKind {
                  END;\n"
             }
             Self::Sql => "SELECT * FROM dual\n",
-            Self::Command => "SET SERVEROUTPUT ON\n",
+            Self::Command => "",
             Self::ExplainPlan => "EXPLAIN PLAN FOR\nSELECT 1 FROM dual;\n",
         }
     }

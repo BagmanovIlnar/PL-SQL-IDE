@@ -365,6 +365,7 @@
         "status.resumed": "Execution resumed",
         "command.dialog": "Dialog",
         "command.edit": "Edit",
-        "command.dialog_empty": "No commands yet"
+        "command.dialog_empty": "No commands yet",
+        "command.not_connected": "Not connected"
     }
 }
