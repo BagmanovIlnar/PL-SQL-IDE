@@ -5116,27 +5116,40 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
     editor
 }
 
-/// Console banner shown once at the top of an empty Command-window dialog.
+/// Console banner shown at the top of an empty Command-window dialog.
 // ponytail: banner from profile metadata; query v$version for the exact
 // "…Enterprise Edition Release …" wording when it matters.
+fn command_banner_for(profile: &ConnectionProfile) -> String {
+    if profile.db_kind == DbKind::Oracle {
+        format!(
+            "Connected to Oracle Database — {}@{}:{}/{}\n\n",
+            profile.username, profile.host, profile.port, profile.database
+        )
+    } else {
+        format!(
+            "Connected to PostgreSQL — {}@{}:{}/{}\n\n",
+            profile.username, profile.host, profile.port, profile.database
+        )
+    }
+}
+
 fn command_banner(app: &App) -> String {
     match app.active_worksheet_profile() {
-        Some(p) if p.db_kind == DbKind::Oracle => format!(
-            "Connected to Oracle Database — {}@{}:{}/{}\n\n",
-            p.username, p.host, p.port, p.database
-        ),
-        Some(p) => format!(
-            "Connected to {} — {}@{}:{}/{}\n\n",
-            match p.db_kind {
-                DbKind::Postgres => "PostgreSQL",
-                _ => "Database",
-            },
-            p.username,
-            p.host,
-            p.port,
-            p.database
-        ),
+        Some(p) => command_banner_for(p),
         None => format!("{}\n\n", i18n::t("command.not_connected")),
+    }
+}
+
+/// Borderless monospace input so the SQL> prompt line merges into the
+/// console text.
+fn console_input_style() -> iced::widget::text_input::Style {
+    iced::widget::text_input::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border::default(),
+        icon: Color::TRANSPARENT,
+        placeholder: ui_theme::current().muted,
+        value: ui_theme::current().text,
+        selection: ui_theme::current().accent,
     }
 }
 
@@ -5211,20 +5224,34 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
     let body: Element<'a, Message> = if edit_tab {
         editor
     } else {
+        // Console look: one continuous monospace block — history, then the
+        // SQL> prompt with a borderless input (native blinking caret).
+        let profile = sheet
+            .connection_id
+            .and_then(|id| app.connections.iter().find(|p| p.id == id));
+        let connected = profile
+            .map(|p| oracle_pool::has_target(p.id))
+            .unwrap_or(false);
+        let history: Element<'a, Message> = if !dialog.is_empty() {
+            text(dialog).size(12).font(Font::MONOSPACE).into()
+        } else if let Some(p) = profile.filter(|_| connected) {
+            text(command_banner_for(p))
+                .size(12)
+                .font(Font::MONOSPACE)
+                .into()
+        } else {
+            text(i18n::t("command.not_connected"))
+                .size(12)
+                .color(ui_theme::current().muted)
+                .into()
+        };
         let input = text_input("", &sheet.command_input)
             .on_input(Message::CommandInput)
             .on_submit(Message::CommandSubmit)
             .size(12)
             .font(Font::MONOSPACE)
-            .width(Fill);
-        let history: Element<'a, Message> = if dialog.is_empty() {
-            text(i18n::t("command.dialog_empty"))
-                .size(12)
-                .color(ui_theme::current().muted)
-                .into()
-        } else {
-            text(dialog).size(12).font(Font::MONOSPACE).into()
-        };
+            .width(Fill)
+            .style(|_, _| console_input_style());
         scrollable(
             column![
                 history,
@@ -5235,10 +5262,9 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
                         .color(ui_theme::current().accent),
                     input,
                 ]
-                .align_y(Vertical::Center)
-                .spacing(4),
+                .align_y(Vertical::Center),
             ]
-            .spacing(8)
+            .spacing(0)
             .padding(Padding::from([6, 8])),
         )
         .height(Fill)
