@@ -178,11 +178,11 @@ struct Worksheet {
     command_edit: bool,
     /// Command window dialog: accumulated "SQL> …" history with output.
     command_dialog: String,
-    /// Selectable view of `command_dialog`; rebuilt on append. Typed keys in
-    /// it are routed to the SQL> input — selection never breaks typing.
-    command_dialog_view: Content,
     /// Output held back while paused; flushed into the dialog on resume.
     command_pending: String,
+    /// Line index of the current entry (its echo) in `command_dialog`, so the
+    /// console can scroll the just-run command to the top of the viewport.
+    command_entry_line: usize,
     /// Command window: execution paused (dialog updates held back).
     command_paused: bool,
     /// Command window: current text of the `SQL>` input line.
@@ -485,8 +485,6 @@ enum Message {
     EditorThumbRelease,
     /// Copy a modal's error text to the clipboard.
     CopyError(String),
-    /// Mouse/keys in the console dialog: selection renders; keys route.
-    ConsoleAction(Action),
     /// Put keyboard focus on the SQL> input (deferred, post-render).
     CommandFocus,
     FilterChanged(String),
@@ -742,8 +740,8 @@ impl App {
             dirty: false,
             command_edit: false,
             command_dialog: String::new(),
-            command_dialog_view: Content::new(),
             command_pending: String::new(),
+            command_entry_line: 0,
             command_paused: false,
             command_input: String::new(),
             command_last: String::new(),
@@ -1194,42 +1192,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
-        Message::ConsoleAction(action) => {
-            tracing::info!(target: "command", ?action, "console action");
-            let mut enter = false;
-            let mut focus_back = false;
-            match action {
-                Action::Edit(edit) => {
-                    focus_back = true;
-                    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                        match edit {
-                            Edit::Insert(c) => sheet.command_input.push(c),
-                            Edit::Paste(text) => sheet.command_input.push_str(&text),
-                            Edit::Backspace => {
-                                sheet.command_input.pop();
-                            }
-                            Edit::Enter => enter = true,
-                            Edit::Indent | Edit::Unindent | Edit::Delete => {}
-                        }
-                    }
-                }
-                other => {
-                    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                        sheet.command_dialog_view.perform(other);
-                        let cursor = sheet.command_dialog_view.cursor();
-                        tracing::info!(target: "command", selected = cursor.selection.is_some(), "selection after action");
-                    }
-                }
-            }
-            if enter {
-                update_inner(app, Message::CommandSubmit)
-            } else if focus_back {
-                focus_command_input()
-            } else {
-                Task::none()
-            }
+        Message::CommandFocus => {
+            tracing::info!(target: "command", "focus: command window opened");
+            focus_command_input()
         }
-        Message::CommandFocus => focus_command_input(),
         Message::VarDetails(name, value) => {
             app.var_details = Some((name, value));
             Task::none()
@@ -1565,6 +1531,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     dialog_push(sheet, &banner);
                 }
                 // Echo exactly what was typed ("/" stays "/"), run the resolved command.
+                sheet.command_entry_line = sheet.command_dialog.lines().count();
                 let display = console_expand_tabs(&raw);
                 dialog_push(sheet, &format!("SQL> {display}\n"));
                 cmd
@@ -1572,7 +1539,16 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // Echo is already in the dialog — only the output comes later.
             app.command_echo = Some(String::new());
             let run = run_spike_with_sql(app, FetchMode::Execute, Some(cmd));
-            Task::batch([focus_command_input(), console_snap_to_bottom(), run])
+            Task::batch([
+                focus_command_input(),
+                console_scroll_to_entry(
+                    app.worksheets
+                        .get(app.active_tab)
+                        .map(|s| s.command_entry_line)
+                        .unwrap_or(0),
+                ),
+                run,
+            ])
         }
         Message::MenuPause => {
             let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
@@ -2059,6 +2035,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                             if sheet.command_paused {
                                 sheet.command_pending.push_str(&entry);
                             } else {
+                                if !echo.is_empty() {
+                                    sheet.command_entry_line = sheet.command_dialog.lines().count();
+                                }
                                 dialog_push(sheet, &entry);
                                 console_appended = true;
                             }
@@ -2119,6 +2098,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                             if sheet.command_paused {
                                 sheet.command_pending.push_str(&entry);
                             } else {
+                                if !echo.is_empty() {
+                                    sheet.command_entry_line = sheet.command_dialog.lines().count();
+                                }
                                 dialog_push(sheet, &entry);
                                 console_appended = true;
                             }
@@ -2129,11 +2111,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
             if console_appended {
-                let dialog = app
+                let (entry_line, dialog) = app
                     .worksheets
                     .get(app.active_tab)
-                    .map(|s| s.command_dialog.clone())
-                    .unwrap_or_default();
+                    .map(|s| (s.command_entry_line, s.command_dialog.clone()))
+                    .unwrap_or((0, String::new()));
                 tracing::info!(
                     target: "command",
                     len = dialog.len(),
@@ -2141,9 +2123,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     head = %dialog.lines().next().unwrap_or(""),
                     "dialog state after append"
                 );
-                // Inline prompt is the last row — bottom snap keeps it on
-                // screen after every result.
-                Task::batch([console_snap_to_bottom(), focus_command_input()])
+                Task::batch([console_scroll_to_entry(entry_line), focus_command_input()])
             } else {
                 Task::none()
             }
@@ -5303,10 +5283,9 @@ fn console_expand_tabs(value: &str) -> String {
     value.replace('\t', "    ")
 }
 
-/// Appends console text to the dialog history and rebuilds its view.
+/// Appends console text to the dialog history.
 fn dialog_push(sheet: &mut Worksheet, value: &str) {
     sheet.command_dialog.push_str(value);
-    sheet.command_dialog_view = Content::with_text(&sheet.command_dialog);
 }
 
 /// SQL*Plus terminators: a lone `/` line means "run" and a trailing `;` after
@@ -5409,6 +5388,18 @@ fn console_snap_to_bottom() -> Task<Message> {
             x: None,
             y: Some(1.0),
         },
+    )
+}
+
+/// Scrolls so the entry starting at `line` sits at the viewport top — the
+/// command stays visible with its output below (terminal convention).
+/// ponytail: 17px per monospace line at size 12 — tune if headings drift.
+fn console_scroll_to_entry(line: usize) -> Task<Message> {
+    use iced::widget::operation::AbsoluteOffset;
+    let y = line as f32 * 17.0;
+    iced::widget::operation::scroll_to(
+        iced::widget::Id::new("command-console"),
+        AbsoluteOffset { x: 0.0, y },
     )
 }
 
@@ -5567,14 +5558,12 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             })
             .unwrap_or(false);
         let history: Element<'a, Message> = if !dialog.is_empty() {
-            // Selectable dialog: DEFAULT editor style (system selection
-            // highlight), no wrapping; typed keys route to the SQL> input.
-            text_editor(&sheet.command_dialog_view)
+            // Plain text (v3): clicks and keys never get stolen from the
+            // SQL> input; no wrapping, both scrollbars on the container.
+            text(dialog)
                 .size(12)
                 .font(Font::MONOSPACE)
-                .height(iced::Length::Shrink)
                 .wrapping(iced::widget::text::Wrapping::None)
-                .on_action(Message::ConsoleAction)
                 .into()
         } else if let Some(p) = profile.filter(|_| connected) {
             text(command_banner_for(p))
@@ -5596,8 +5585,7 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             .font(Font::MONOSPACE)
             .width(Fill)
             .style(|_, _| console_input_style());
-        // v3 layout, as requested: the SQL> prompt stays inline after the
-        // history inside the scroll.
+        // v3 console look: history, then the inline SQL> prompt after it.
         scrollable(
             column![
                 history,
