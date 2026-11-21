@@ -1476,7 +1476,19 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         Message::MenuExit => iced::exit(),
         Message::MenuExecute => {
             tracing::info!("execute requested");
-            run_spike(app, FetchMode::Execute)
+            // Command window: the button runs the typed SQL> line first
+            // (same as Enter); an empty line falls back to the buffer.
+            let typed = app
+                .worksheets
+                .get(app.active_tab)
+                .filter(|s| s.kind == WindowKind::Command)
+                .map(|s| !s.command_input.trim().is_empty())
+                .unwrap_or(false);
+            if typed {
+                update_inner(app, Message::CommandSubmit)
+            } else {
+                run_spike(app, FetchMode::Execute)
+            }
         }
         Message::MenuStop => {
             let owns_debug =
