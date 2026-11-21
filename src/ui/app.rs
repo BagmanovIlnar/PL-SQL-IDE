@@ -20,8 +20,8 @@ use iced::{
     Background, Color, Element, Event, Fill, Font, Padding, Point, Size, Subscription, Task, Theme,
 };
 use iced_fonts::lucide::{
-    chevron_down, chevron_right, database, folder_plus, pencil, play, plug, plus, square, trash,
-    unplug,
+    chevron_down, chevron_right, database, folder_plus, panel_left_close, panel_left_open, pencil,
+    play, plug, plus, square, trash, unplug,
 };
 use iced_fonts::LUCIDE_FONT_BYTES;
 
@@ -434,6 +434,8 @@ struct App {
     objects_connection: Option<ConnectionId>,
     /// Width of the Connections / Objects sidebar (user-resizable).
     sidebar_width: f32,
+    /// Left sidebar shown/hidden via the panel toggle button.
+    sidebar_visible: bool,
     /// Height of the parameters panel under the editor (user-resizable).
     parameters_height: f32,
     /// Active panel-border drag, if any.
@@ -523,6 +525,8 @@ enum Message {
     GroupDraftParentChanged(String),
     /// Advance the connecting-spinner animation frame.
     ConnectTick,
+    /// Show or hide the left sidebar.
+    ToggleSidebar,
     GroupDialogSave,
     GroupDialogCancel,
     /// Attempt to open a live session for the selected Connections profile.
@@ -630,6 +634,7 @@ impl App {
             objects_error: None,
             objects_connection: None,
             sidebar_width: SIDEBAR_WIDTH_DEFAULT,
+            sidebar_visible: true,
             parameters_height: PANEL_HEIGHT,
             resize_drag: None,
             debug_session: DebugSession::default(),
@@ -1642,6 +1647,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.last_output = format!("Connected, but persistent Oracle session failed: {err}");
             }
             let _ = id;
+            Task::none()
+        }
+        Message::ToggleSidebar => {
+            app.sidebar_visible = !app.sidebar_visible;
             Task::none()
         }
         Message::ConnectTick => {
@@ -2769,7 +2778,7 @@ fn view(app: &App) -> Element<'_, Message> {
     let shell = column![
         ribbon(app),
         rule::horizontal(1).style(|_| rule_style()),
-        row![side_browser(app), vertical_resize_handle(), work_area,].height(Fill),
+        row![sidebar_toggle_strip(app), left_panel(app), work_area,].height(Fill),
         rule::horizontal(1).style(|_| rule_style()),
         status_bar(app),
     ]
@@ -3178,6 +3187,40 @@ fn ribbon(app: &App) -> Element<'_, Message> {
 /// Spinner frames shown while a Connect attempt is in flight (ASCII —
 /// guaranteed glyphs in any font, unlike braille/dots).
 const CONNECT_SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
+
+/// Narrow strip on the far-left edge with the sidebar show/hide toggle.
+fn sidebar_toggle_strip(app: &App) -> Element<'_, Message> {
+    let (icon, tip) = if app.sidebar_visible {
+        (panel_left_close().size(14), i18n::t("sidebar.hide"))
+    } else {
+        (panel_left_open().size(14), i18n::t("sidebar.show"))
+    };
+    container(
+        column![
+            dock_icon_button(icon, tip, Message::ToggleSidebar),
+            container(text("").size(10)).height(Fill),
+        ]
+        .width(26)
+        .height(Fill),
+    )
+    .width(26)
+    .height(Fill)
+    .style(|_| container::Style {
+        background: Some(Background::Color(ui_theme::current().ribbon_bg)),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+/// Left panel: Connections / Objects sidebar with the resize handle, or
+/// nothing when hidden.
+fn left_panel(app: &App) -> Element<'_, Message> {
+    if app.sidebar_visible {
+        row![side_browser(app), vertical_resize_handle()].into()
+    } else {
+        row![].into()
+    }
+}
 
 fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Message> {
     let selected = app.selected_connection == Some(profile.id);

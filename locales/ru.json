@@ -356,6 +356,10 @@
         "prefs.pg.ssl.prefer": "Предпочитать",
         "prefs.pg.ssl.require": "Требовать",
         "prefs.pg.timeout": "Таймаут подключения (сек)",
-        "prefs.pg.timeout_tip": "Сколько секунд ждать установления соединения (connect_timeout в URL). 0 — ждать без ограничения."
+        "prefs.pg.timeout_tip": "Сколько секунд ждать установления соединения (connect_timeout в URL). 0 — ждать без ограничения.",
+        "sidebar": {
+            "hide": "Скрыть панель",
+            "show": "Показать панель"
+        }
     }
 }
