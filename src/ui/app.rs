@@ -1645,12 +1645,17 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ConnectTick => {
+            if app.connect_frame == 0 {
+                tracing::info!("connect: spinner ticking");
+            }
             app.connect_frame = app.connect_frame.wrapping_add(1);
             Task::none()
         }
         Message::ConnectFinished(id, result) => {
             app.busy = false;
             app.connecting = None;
+            app.connect_frame = 0;
+            tracing::info!(?id, ok = result.is_ok(), "connect: finished, spinner off");
             match result {
                 Ok(()) => {
                     app.connection_status
@@ -2170,6 +2175,7 @@ fn run_connect(app: &mut App) -> Task<Message> {
     app.busy = true;
     app.connecting = Some(id);
     app.connect_error = None;
+    tracing::info!(?id, name = %profile.name, "connect: spinner started");
     app.metrics = i18n::t_args("status.connecting", &[("name", profile.name.as_str())]);
 
     match profile.db_kind {
@@ -3172,8 +3178,9 @@ fn ribbon(app: &App) -> Element<'_, Message> {
     column![tab_strip, body_band].into()
 }
 
-/// Braille spinner frames shown while a Connect attempt is in flight.
-const CONNECT_SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// Spinner frames shown while a Connect attempt is in flight (ASCII —
+/// guaranteed glyphs in any font, unlike braille/dots).
+const CONNECT_SPINNER: [char; 4] = ['|', '/', '-', r'\'];
 
 fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Message> {
     let selected = app.selected_connection == Some(profile.id);
@@ -3189,14 +3196,15 @@ fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Me
     // Fixed-width spinner slot keeps the label from shifting when the
     // animation appears/disappears.
     let spinner = if app.connecting == Some(id) {
-        CONNECT_SPINNER[app.connect_frame % CONNECT_SPINNER.len()]
+        text(CONNECT_SPINNER[app.connect_frame % CONNECT_SPINNER.len()])
+            .size(12)
+            .font(Font::MONOSPACE)
+            .color(ui_theme::current().accent)
     } else {
-        ' '
+        text(" ").size(12)
     };
     let body: Element<'static, Message> = row![
-        container(text(spinner).size(12).color(ui_theme::current().accent))
-            .width(14)
-            .center_x(14),
+        container(spinner).width(14).center_x(14),
         label_text,
     ]
     .spacing(4)
