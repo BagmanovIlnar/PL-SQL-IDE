@@ -176,7 +176,7 @@ jobs:
   macos:
     name: macOS Apple Silicon (zip + dmg)
     needs: version
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
