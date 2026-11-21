@@ -30,10 +30,17 @@ async fn run_main() {
       v_name VARCHAR2(20) := 'ильнар';
       v_when DATE := SYSDATE;
       v_flag BOOLEAN := TRUE;
+      TYPE t_tab IS TABLE OF NUMBER;
+      TYPE t_rec IS RECORD (a NUMBER, b VARCHAR2(10));
+      v_tab t_tab := t_tab(7, 8, 9);
+      v_rec t_rec;
 BEGIN
       :TEST := 'cdcd';
       v_x := 42;
       v_name := 'тест';
+      v_tab := t_tab(11, 22);
+      v_rec.a := 5;
+      v_rec.b := 'пять';
 END;";
     let mut params = plsqlide::ui::parameters::parse_binds(source)
         .into_iter()
@@ -66,6 +73,7 @@ END;";
                     "active={} line={:?} status={}",
                     ev.active, ev.current_line, ev.status
                 );
+                println!("msg: {}", ev.message);
                 for l in &ev.log {
                     println!("  log: {l}");
                 }

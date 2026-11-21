@@ -9,6 +9,8 @@
 //! the `plsqlide__dbg(k)` calls are appended to the END of the previous line
 //! (k = the statement's own line number), so the editor line numbers match.
 
+use std::collections::HashMap;
+
 /// One-line debug stub injected into the block's DECLARE section.
 /// `PLSQLIDE__MODE` is the enclosing block's local variable; it carries the
 /// resume mode between calls: `STEP`, `STOP` or `RUN:<line>,<line>,…`.
@@ -58,7 +60,34 @@ fn stub(pipe: &str) -> String {
 /// ponytail: naive ';'-statement scanner; nested procedures are skipped by
 /// first word, exotic declarations (records, collections, cursors) are
 /// simply not watched.
-fn declared_vars(stripped: &[String]) -> Vec<(String, String)> {
+/// One declared variable: a scalar with a format expression, or a composite
+/// whose shape is known from an inline TYPE declaration (collections render
+/// as `(e1, e2, ...)`, records as `(f1: ..., f2: ...)`). Types of unknown
+/// shape (schema/package types) stay unreported — compiling `.FIRST` etc.
+/// against a record/object would kill the whole block.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Var {
+    Scalar(String, String),
+    Collection(String, String),
+    Record(String, Vec<(String, String)>),
+}
+
+enum LocalType {
+    Coll(String),
+    Rec(Vec<(String, String)>),
+}
+
+fn fmt_expr(target: &str, kind: &str) -> String {
+    match kind {
+        "BOOLEAN" => format!(
+            "CASE WHEN {target} IS NULL THEN 'NULL' WHEN {target} THEN 'TRUE' ELSE 'FALSE' END"
+        ),
+        "DATE" | "TIMESTAMP" => format!("NVL(TO_CHAR({target},'DD.MM.YYYY HH24:MI:SS'),'NULL')"),
+        _ => format!("NVL(SUBSTR(TO_CHAR({target}),1,120),'NULL')"),
+    }
+}
+
+fn declared_vars(stripped: &[String], types: &mut HashMap<String, LocalType>) -> Vec<Var> {
     const TYPES: &[&str] = &[
         "NUMBER", "VARCHAR2", "VARCHAR", "CHAR", "NCHAR", "NVARCHAR2", "DATE", "BOOLEAN",
         "PLS_INTEGER", "BINARY_INTEGER", "BINARY_DOUBLE", "INTEGER", "INT", "SMALLINT",
@@ -68,6 +97,7 @@ fn declared_vars(stripped: &[String]) -> Vec<(String, String)> {
     let mut vars = Vec::new();
     let mut skip = 0u32;
     for stmt in section.split(';') {
+        let upper_stmt = stmt.to_ascii_uppercase();
         let tokens: Vec<String> = stmt
             .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
             .filter(|t| !t.is_empty())
@@ -84,6 +114,49 @@ fn declared_vars(stripped: &[String]) -> Vec<(String, String)> {
             }
             continue;
         }
+        // Inline TYPE declaration — remember the shape so variables of this
+        // type render in the Variables tab (single-line declarations only:
+        // `ponytail:` multi-line records are skipped, not guessed).
+        if first == "TYPE" {
+            if let Some(tname) = tokens.get(1).cloned() {
+                if let Some(is) = tokens.iter().position(|t| t == "IS") {
+                    let after = tokens.get(is + 1).map(String::as_str).unwrap_or("");
+                    if after == "TABLE" || after == "VARRAY" {
+                        if let Some(of) = tokens.iter().position(|t| t == "OF") {
+                            if let Some(elem) = tokens.get(of + 1) {
+                                if elem != "INDEX" && elem != "NOT" {
+                                    types.insert(tname, LocalType::Coll(elem.clone()));
+                                }
+                            }
+                        }
+                    } else if after == "RECORD" {
+                        // ponytail: naive comma split — a field like
+                        // `c NUMBER(5,2)` breaks the field after it; capped
+                        // at 20 fields, real editors format declarations.
+                        if let (Some(open), Some(close)) =
+                            (upper_stmt.find('('), upper_stmt.rfind(')'))
+                        {
+                            let fields: Vec<(String, String)> = upper_stmt[open + 1..close]
+                                .split(',')
+                                .filter_map(|part| {
+                                    let mut toks = part
+                                        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                                        .filter(|t| !t.is_empty());
+                                    let f = toks.next()?.to_string();
+                                    let k = toks.next()?.to_string();
+                                    Some((f, k))
+                                })
+                                .take(20)
+                                .collect();
+                            if !fields.is_empty() {
+                                types.insert(tname, LocalType::Rec(fields));
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         // Keywords without a ';' terminator glue onto the next declaration:
         // "BEGIN DECLARE v_x NUMBER" — drop leading BEGIN/DECLARE keywords.
         let tokens: &[String] = match (first, tokens.get(1).map(String::as_str)) {
@@ -95,57 +168,98 @@ fn declared_vars(stripped: &[String]) -> Vec<(String, String)> {
         let (Some(name), Some(kind)) = (tokens.first(), tokens.get(1)) else {
             continue;
         };
-        if name.starts_with("PLSQLIDE_") || !TYPES.contains(&kind.as_str()) {
+        if name.starts_with("PLSQLIDE_") {
             continue;
         }
-        let expr = match kind.as_str() {
-            "BOOLEAN" => format!(
-                "CASE WHEN {name} IS NULL THEN 'NULL' WHEN {name} THEN 'TRUE' ELSE 'FALSE' END"
-            ),
-            "DATE" | "TIMESTAMP" => {
-                format!("NVL(TO_CHAR({name},'DD.MM.YYYY HH24:MI:SS'),'NULL')")
+        if TYPES.contains(&kind.as_str()) {
+            vars.push(Var::Scalar(name.clone(), fmt_expr(name, kind)));
+        } else if let Some(local) = types.get(kind.as_str()) {
+            match local {
+                LocalType::Coll(elem) => {
+                    vars.push(Var::Collection(name.clone(), elem.clone()));
+                }
+                LocalType::Rec(fields) => {
+                    vars.push(Var::Record(name.clone(), fields.clone()));
+                }
             }
-            _ => format!("NVL(SUBSTR(TO_CHAR({name}),1,120),'NULL')"),
-        };
-        vars.push((name.clone(), expr));
+        }
     }
     vars
 }
 
-/// Debug helper: declared scalar variables of the source block.
-pub fn declared_vars_public(source: &str) -> Vec<(String, String)> {
-    let raw: Vec<&str> = source.lines().collect();
-    let mut stripped: Vec<String> = Vec::with_capacity(raw.len());
-    let (mut in_string, mut in_block) = (false, false);
-    for line in &raw {
-        stripped.push(strip_line(line, &mut in_string, &mut in_block));
-    }
-    declared_vars(&stripped)
-}
-
 /// Pipe packs for the declared variables, sent as a separate message when
 /// the pause actually happened (the stub returns 1).
-fn var_packs(vars: &[(String, String)], pipe: &str) -> String {
+fn var_packs(vars: &[Var], pipe: &str) -> String {
     if vars.is_empty() {
         return String::new();
     }
     // ponytail: one item with CHR(10) separators — this 11.2 build stops
     // reporting items after the first UNPACK, so multi-item messages lose data.
     let mut big = String::new();
-    for (name, expr) in vars {
-        if !big.is_empty() {
-            big.push_str(" || CHR(10) || ");
+    let mut blocks = String::new();
+    for v in vars {
+        match v {
+            Var::Scalar(name, expr) => {
+                if !big.is_empty() {
+                    big.push_str(" || CHR(10) || ");
+                }
+                big.push_str(&format!("'V {name}=' || {expr}"));
+            }
+            Var::Collection(name, elem) => blocks.push_str(&collection_pack(name, elem)),
+            Var::Record(name, fields) => blocks.push_str(&record_pack(name, fields)),
         }
-        big.push_str(&format!("'V {name}=' || {expr}"));
     }
     // ponytail: send failures (huge lists) are swallowed — vars are a
     // convenience view, not a transactional feature.
+    let scalar_part = if big.is_empty() {
+        String::new()
+    } else {
+        format!(" BEGIN m := {big} || CHR(10); EXCEPTION WHEN OTHERS THEN NULL; END;")
+    };
     format!(
-        " DECLARE st INTEGER; m VARCHAR2(32767); BEGIN m := {big}; \
-         SYS.DBMS_PIPE.PACK_MESSAGE(m); \
+        " DECLARE st INTEGER; m VARCHAR2(32767); BEGIN{scalar_part}{blocks}          SYS.DBMS_PIPE.PACK_MESSAGE(m); \
          st := SYS.DBMS_PIPE.SEND_MESSAGE('{p}_E'); \
          EXCEPTION WHEN OTHERS THEN NULL; END;",
         p = pipe
+    )
+}
+
+/// Collection value renders as `(e1, e2, ...)` — up to 50 elements, `NULL`
+/// for an uninitialised one, `<не отображается>` if the element can't be
+/// stringified (per-var exception keeps the rest of the report alive).
+fn collection_pack(name: &str, elem: &str) -> String {
+    let elem_expr = fmt_expr(&format!("{name}(i)"), elem);
+    format!(
+        " DECLARE s VARCHAR2(2000); i PLS_INTEGER; n PLS_INTEGER; BEGIN \
+         IF {name} IS NULL THEN s := 'NULL'; \
+         ELSE i := {name}.FIRST; s := '('; n := 0; \
+         WHILE i IS NOT NULL AND n < 50 LOOP \
+         IF s <> '(' THEN s := s || ', '; END IF; \
+         s := s || {elem_expr}; \
+         i := {name}.NEXT(i); n := n + 1; END LOOP; \
+         IF i IS NOT NULL THEN s := s || ', ...'; END IF; \
+         s := s || ')'; END IF; \
+         m := m || 'V {name}=' || s || CHR(10); \
+         EXCEPTION WHEN OTHERS THEN m := m || 'V {name}=<не отображается>' || CHR(10); END;"
+    )
+}
+
+/// Record value renders as `(f1: v1, f2: v2)` from the inline declaration.
+fn record_pack(name: &str, fields: &[(String, String)]) -> String {
+    let mut body = String::new();
+    for (idx, (field, kind)) in fields.iter().enumerate() {
+        let expr = fmt_expr(&format!("{name}.{field}"), kind);
+        if idx == 0 {
+            body.push_str(&format!("s := '(' || {expr}; "));
+        } else {
+            body.push_str(&format!("s := s || ', ' || {expr}; "));
+        }
+    }
+    format!(
+        " DECLARE s VARCHAR2(2000); BEGIN \
+         {body}s := s || ')'; \
+         m := m || 'V {name}=' || s || CHR(10); \
+         EXCEPTION WHEN OTHERS THEN m := m || 'V {name}=<не отображается>' || CHR(10); END;"
     )
 }
 
@@ -260,16 +374,16 @@ pub fn instrument(source: &str, pipe: &str) -> String {
 
     // Injection happens appended to the previous code line (never inside the
     // DECLARE section, i.e. only after some BEGIN has been seen).
-    let mut injected: Vec<(usize, usize, Vec<(String, String)>)> =
-        Vec::new(); // (prev_idx, stmt_line, visible vars)
+    let mut injected: Vec<(usize, usize, Vec<Var>)> = Vec::new(); // (prev_idx, stmt_line, visible vars)
+    let mut local_types: HashMap<String, LocalType> = HashMap::new();
     let mut executable_seen = false;
     // Any DECLARE section (outer block, wrapper block, nested procedure)
     // holds declarations — never inject there.
     let mut in_declare = false;
     // Visibility stack: vars collected in the DECLARE section are visible
     // from that section's BEGIN until the block's END.
-    let mut scope_vars: Vec<Vec<(String, String)>> = Vec::new();
-    let mut decl_buf: Vec<(String, String)> = Vec::new();
+    let mut scope_vars: Vec<Vec<Var>> = Vec::new();
+    let mut decl_buf: Vec<Var> = Vec::new();
     for idx in 0..raw.len() {
         let upper = stripped[idx].trim().to_ascii_uppercase();
         let first_word = upper
@@ -292,6 +406,7 @@ pub fn instrument(source: &str, pipe: &str) -> String {
         if in_declare {
             decl_buf.extend(declared_vars(
                 stripped[idx..=idx.min(stripped.len() - 1)].to_vec().as_slice(),
+                &mut local_types,
             ));
         }
         if last_word(&stripped[idx]).as_deref() == Some("END") {
@@ -341,7 +456,7 @@ pub fn instrument(source: &str, pipe: &str) -> String {
     let mut out: Vec<String> = Vec::with_capacity(raw.len());
     for (idx, line) in raw.iter().enumerate() {
         let line = line.trim_end_matches('\r');
-        let calls: Vec<(usize, &Vec<(String, String)>)> = injected
+        let calls: Vec<(usize, &Vec<Var>)> = injected
             .iter()
             .filter(|(prev, _, _)| *prev == idx)
             .map(|(_, stmt, vars)| (*stmt, vars))
@@ -389,6 +504,21 @@ mod tests {
         assert!(out.contains("plsqlide__pause("));
         // stub is the last declaration, right before BEGIN
         assert!(out.lines().nth(1).unwrap().trim_end().ends_with("END;"));
+    }
+
+    #[test]
+    fn composites_render_from_local_types() {
+        let src = "DECLARE\n  TYPE t_tab IS TABLE OF NUMBER;\n  TYPE t_rec IS RECORD (a NUMBER, b VARCHAR2(10));\n  v_tab t_tab;\n  v_rec t_rec;\n  v_out some_pkg.t_type;\nBEGIN\n  NULL;\n  v_tab := NULL;\nEND;";
+        let out = instrument(src, "P");
+        // collection: (e1, e2, ...) with NULL guard and NEXT walk
+        assert!(out.contains("IF V_TAB IS NULL THEN s := 'NULL';"));
+        assert!(out.contains("V_TAB.FIRST"));
+        assert!(out.contains("V V_TAB=' || s"));
+        // record: (f1: ..., f2: ...)
+        assert!(out.contains("V_REC.A"));
+        assert!(out.contains("V V_REC=' || s"));
+        // unknown shape — skipped, never compiled against
+        assert!(!out.contains("V_OUT"));
     }
 
     #[test]
