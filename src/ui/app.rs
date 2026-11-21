@@ -1645,9 +1645,6 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ConnectTick => {
-            if app.connect_frame == 0 {
-                tracing::info!("connect: spinner ticking");
-            }
             app.connect_frame = app.connect_frame.wrapping_add(1);
             Task::none()
         }
@@ -2126,7 +2123,7 @@ fn subscription(app: &App) -> Subscription<Message> {
         .connecting
         .is_some()
         .then(|| {
-            iced::time::every(std::time::Duration::from_millis(120)).map(|_| Message::ConnectTick)
+            iced::time::every(std::time::Duration::from_millis(100)).map(|_| Message::ConnectTick)
         })
         .unwrap_or_else(Subscription::none);
     Subscription::batch([
@@ -3195,16 +3192,17 @@ fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Me
     };
     // Fixed-width spinner slot keeps the label from shifting when the
     // animation appears/disappears.
-    let spinner = if app.connecting == Some(id) {
+    let connecting = app.connecting == Some(id);
+    let spinner = if connecting {
         text(CONNECT_SPINNER[app.connect_frame % CONNECT_SPINNER.len()])
-            .size(12)
+            .size(14)
             .font(Font::MONOSPACE)
-            .color(ui_theme::current().accent)
+            .color(ui_theme::error())
     } else {
-        text(" ").size(12)
+        text(" ").size(14)
     };
     let body: Element<'static, Message> =
-        row![container(spinner).width(14).center_x(14), label_text,]
+        row![container(spinner).width(16).center_x(16), label_text,]
             .spacing(4)
             .align_y(Vertical::Center)
             .into();
