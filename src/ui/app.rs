@@ -1482,8 +1482,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 if sheet.command_dialog.is_empty() {
                     sheet.command_dialog.push_str(&banner);
                 }
-                let echo = console_expand_tabs(cmd.trim_end_matches(['\n', '\r']));
-                sheet.command_dialog.push_str(&format!("SQL> {echo}\n"));
+                // Echo exactly what was typed ("/" stays "/"), run the resolved command.
+                let display = console_expand_tabs(&raw);
+                sheet.command_dialog.push_str(&format!("SQL> {display}\n"));
                 cmd
             };
             // Echo is already in the dialog — only the output comes later.
