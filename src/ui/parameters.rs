@@ -26,46 +26,6 @@ pub const PANEL_HEIGHT_MIN: f32 = 80.0;
 /// Maximum height of the parameters strip when resized by the user.
 pub const PANEL_HEIGHT_MAX: f32 = 480.0;
 
-/// Input / output mode of a bind or test parameter.
-///
-/// # Examples
-///
-/// ```
-/// use plsqlide::ui::parameters::ParamMode;
-///
-/// assert_eq!(ParamMode::In.label(), "IN");
-/// assert_eq!(ParamMode::InOut.label(), "IN OUT");
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ParamMode {
-    #[default]
-    In,
-    Out,
-    InOut,
-}
-
-impl ParamMode {
-    /// Short label shown in the Mode column and pick list.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::In => "IN",
-            Self::Out => "OUT",
-            Self::InOut => "IN OUT",
-        }
-    }
-
-    /// All selectable modes in display order.
-    pub fn all() -> [Self; 3] {
-        [Self::In, Self::Out, Self::InOut]
-    }
-}
-
-impl std::fmt::Display for ParamMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
 /// Oracle SQL / PL/SQL types shown in the Type column for Oracle worksheets.
 ///
 /// # Examples
@@ -338,21 +298,18 @@ impl std::fmt::Display for ParamDataType {
 /// # Examples
 ///
 /// ```
-/// use plsqlide::ui::parameters::{ParamDataType, ParamMode, Parameter, PostgresType};
+/// use plsqlide::ui::parameters::{ParamDataType, Parameter, PostgresType};
 ///
 /// let p = Parameter::new(
 ///     "p_id",
-///     ParamMode::In,
 ///     ParamDataType::Postgres(PostgresType::Integer),
 /// );
 /// assert_eq!(p.name, "p_id");
-/// assert_eq!(p.mode, ParamMode::In);
 /// assert!(p.value.is_empty());
 /// ```
 #[derive(Debug, Clone)]
 pub struct Parameter {
     pub name: String,
-    pub mode: ParamMode,
     pub data_type: ParamDataType,
     pub value: String,
 }
@@ -363,20 +320,17 @@ impl Parameter {
     /// # Examples
     ///
     /// ```
-    /// use plsqlide::ui::parameters::{OracleType, ParamDataType, ParamMode, Parameter};
+    /// use plsqlide::ui::parameters::{OracleType, ParamDataType, Parameter};
     ///
     /// let p = Parameter::new(
     ///     "v_name",
-    ///     ParamMode::Out,
     ///     ParamDataType::Oracle(OracleType::Varchar2),
     /// );
-    /// assert_eq!(p.mode, ParamMode::Out);
     /// assert_eq!(p.data_type.label(), "VARCHAR2");
     /// ```
-    pub fn new(name: impl Into<String>, mode: ParamMode, data_type: ParamDataType) -> Self {
+    pub fn new(name: impl Into<String>, data_type: ParamDataType) -> Self {
         Self {
             name: name.into(),
-            mode,
             data_type,
             value: String::new(),
         }
@@ -425,7 +379,6 @@ impl ParametersPanel {
         let index = self.rows.len() + 1;
         self.rows.push(Parameter::new(
             format!("p_{index}"),
-            ParamMode::In,
             ParamDataType::default_for(db_kind),
         ));
         self.selected = Some(self.rows.len() - 1);
@@ -686,7 +639,6 @@ pub enum ParamMessage {
     Delete,
     Select(usize),
     NameChanged(usize, String),
-    ModeChanged(usize, ParamMode),
     TypeChanged(usize, ParamDataType),
     ValueChanged(usize, String),
     OpenValueEditor(usize),
@@ -735,7 +687,6 @@ pub fn parameters_view(
     let header = row![
         header_cell(String::new(), 28.0),
         header_cell(crate::ui::i18n::t("params.variable"), 140.0),
-        header_cell(crate::ui::i18n::t("params.mode"), 90.0),
         header_cell(crate::ui::i18n::t("params.type"), 180.0),
         header_cell(crate::ui::i18n::t("params.value"), Fill),
     ]
@@ -789,13 +740,6 @@ fn parameter_row(
         .size(12)
         .width(140);
 
-    let mode_pick = pick_list(ParamMode::all(), Some(param.mode), move |mode| {
-        ParamMessage::ModeChanged(index, mode)
-    })
-    .padding(4)
-    .text_size(12)
-    .width(90);
-
     let type_pick = pick_list(type_options, Some(selected_type), move |data_type| {
         ParamMessage::TypeChanged(index, data_type)
     })
@@ -820,7 +764,6 @@ fn parameter_row(
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center),
         name_input,
-        mode_pick,
         type_pick,
         value_input,
         ellipsis,

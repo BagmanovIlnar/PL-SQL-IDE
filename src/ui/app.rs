@@ -881,14 +881,6 @@ impl App {
                     }
                 }
             }
-            ParamMessage::ModeChanged(index, mode) => {
-                if let Some(panel) = self.active_parameters_mut() {
-                    if let Some(row) = panel.rows.get_mut(index) {
-                        row.mode = mode;
-                    }
-                    panel.select(index);
-                }
-            }
             ParamMessage::TypeChanged(index, data_type) => {
                 if let Some(panel) = self.active_parameters_mut() {
                     if let Some(row) = panel.rows.get_mut(index) {
