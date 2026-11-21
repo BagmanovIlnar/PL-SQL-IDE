@@ -1466,6 +1466,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.metrics = i18n::t("status.cancelled");
             Task::none()
         }
+        Message::CommandTab(false) => focus_command_input(),
         Message::CommandTab(edit) => {
             if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                 sheet.command_edit = edit;
@@ -1512,7 +1513,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // Echo is already in the dialog — only the output comes later.
             app.command_echo = Some(String::new());
             let run = run_spike_with_sql(app, FetchMode::Execute, Some(cmd));
-            Task::batch([console_snap_to_bottom(), run])
+            Task::batch([focus_command_input(), console_snap_to_bottom(), run])
         }
         Message::MenuPause => {
             let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
@@ -2071,7 +2072,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             }
             if console_appended {
                 persist_command_dialog(app);
-                console_snap_to_bottom()
+                Task::batch([console_snap_to_bottom(), focus_command_input()])
             } else {
                 Task::none()
             }
@@ -5337,6 +5338,12 @@ fn sqlplus_table(columns: &[String], rows: &[Vec<String>]) -> String {
     out
 }
 
+/// Puts keyboard focus on the SQL> input line — a command line must always
+/// accept typing, whatever was clicked before.
+fn focus_command_input() -> Task<Message> {
+    iced::widget::operation::focus(iced::widget::Id::new("command-input"))
+}
+
 /// Scrolls the command console to the bottom, KEEPING the horizontal
 /// position (snap_to_end would also jump to the right edge of wide tables
 /// and the console would look blank).
@@ -5538,6 +5545,7 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
                 .into()
         };
         let input = text_input("", &sheet.command_input)
+            .id(iced::widget::Id::new("command-input"))
             .on_input(Message::CommandInput)
             .on_submit(Message::CommandSubmit)
             .size(12)
