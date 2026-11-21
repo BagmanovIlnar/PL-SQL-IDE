@@ -64,7 +64,6 @@ const SIDEBAR_WIDTH_MAX: f32 = 640.0;
 use iced_aw::menu::{DrawPath, Item, Menu, MenuBar};
 use iced_aw::style::menu_bar as menu_bar_style;
 
-use crate::core::command_history;
 use crate::core::connections_store::{self, ConnectionsStore};
 use crate::core::data_changes;
 use crate::core::debug_session::{Breakpoint, DebugCommand, DebugSession};
@@ -397,8 +396,6 @@ struct App {
     error_modal: Option<String>,
     /// Open details dialog for a debug variable: (name, selectable value).
     var_details: Option<(String, String)>,
-    /// Command-window dialog history per connection (persisted on disk).
-    command_history: HashMap<String, String>,
     dialog: Option<ConnectionDraft>,
     dialog_error: Option<String>,
     /// Sidebar group names in display order (persisted in connections.json).
@@ -662,7 +659,6 @@ impl App {
             resize_drag: None,
             debug_session: DebugSession::default(),
             var_details: None,
-            command_history: command_history::load(),
             debug_system: oracle_debugger_prefs::load().default_debug_system,
             close_confirm: None,
             editor_viewport: Cell::new(Size::ZERO),
@@ -738,9 +734,7 @@ impl App {
             file_path: None,
             dirty: false,
             command_edit: false,
-            command_dialog: connection_id
-                .and_then(|id| self.command_history.get(&id.to_string()).cloned())
-                .unwrap_or_default(),
+            command_dialog: String::new(),
             command_pending: String::new(),
             command_paused: false,
             command_input: String::new(),
@@ -1507,7 +1501,6 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 // Echo exactly what was typed ("/" stays "/"), run the resolved command.
                 let display = console_expand_tabs(&raw);
                 dialog_push(sheet, &format!("SQL> {display}\n"));
-                persist_command_dialog(app);
                 cmd
             };
             // Echo is already in the dialog — only the output comes later.
@@ -1526,7 +1519,6 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 sheet.command_paused = false;
                 let pending = std::mem::take(&mut sheet.command_pending);
                 dialog_push(sheet, &pending);
-                persist_command_dialog(app);
                 app.metrics = i18n::t("status.resumed");
             } else {
                 sheet.command_paused = true;
@@ -2071,7 +2063,6 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
             if console_appended {
-                persist_command_dialog(app);
                 Task::batch([console_snap_to_bottom(), focus_command_input()])
             } else {
                 Task::none()
@@ -5237,24 +5228,6 @@ fn dialog_push(sheet: &mut Worksheet, value: &str) {
     sheet.command_dialog.push_str(value);
 }
 
-/// Saves the active command dialog to disk, keyed by its connection, so the
-/// history survives app restarts.
-fn persist_command_dialog(app: &mut App) {
-    let Some(sheet) = app.worksheets.get(app.active_tab) else {
-        return;
-    };
-    if sheet.kind != WindowKind::Command {
-        return;
-    }
-    let Some(id) = sheet.connection_id else {
-        return;
-    };
-    app.command_history
-        .insert(id.to_string(), sheet.command_dialog.clone());
-    #[cfg(not(test))]
-    command_history::save(&app.command_history);
-}
-
 /// SQL*Plus terminators: a lone `/` line means "run" and a trailing `;` after
 /// a plain SQL statement is client-side — neither reaches the server.
 /// PL/SQL blocks (declare/begin/create/with…) keep their semicolons.
@@ -6154,14 +6127,14 @@ fn default_file_name(kind: WindowKind) -> String {
 }
 
 #[cfg(test)]
-mod command_history_tests {
+mod command_dialog_tests {
     use super::*;
 
     /// Two full command rounds through the real update loop: every echo and
     /// every result must stay in the dialog (it is a command line — history
     /// is never cleared).
     #[test]
-    fn command_history_accumulates() {
+    fn command_dialog_accumulates() {
         let mut app = App::new();
         app.open_window(WindowKind::Command);
         for (cmd, value) in [("select 1 from dual;", "1"), ("select 2 from dual;", "2")] {
