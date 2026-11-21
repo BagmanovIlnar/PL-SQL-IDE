@@ -4470,10 +4470,10 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
             })
             .unwrap_or(DbKind::Postgres);
         let show_result_tab = sheet.kind == WindowKind::Sql;
-        let tab = if show_result_tab {
-            app.bottom_tab
-        } else {
-            BottomTab::Parameters
+        let tab = match app.bottom_tab {
+            // Test/code windows have no Result tab — clamp to Parameters.
+            BottomTab::Result if !show_result_tab => BottomTab::Parameters,
+            tab => tab,
         };
         let panel: Element<'_, Message> = match tab {
             BottomTab::Result => container(result_grid::view(&sheet.result).map(Message::Grid))
