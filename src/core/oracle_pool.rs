@@ -20,6 +20,10 @@ struct PoolEntry {
     target: Option<Connection>,
     #[cfg(feature = "oracle")]
     debug_ctrl: Option<Connection>,
+    /// Guards against a stale background thread reattaching a connection
+    /// while a newer debug session already owns the slot.
+    #[cfg(feature = "oracle")]
+    generation: u64,
 }
 
 /// Open (or replace) the target session for `profile` after a successful Connect.
@@ -35,6 +39,7 @@ pub fn open_target(profile: &ConnectionProfile) -> CoreResult<()> {
         PoolEntry {
             target: Some(connection),
             debug_ctrl: None,
+            generation: 0,
         },
     );
     Ok(())
@@ -95,6 +100,7 @@ pub mod debug_access {
             e.insert(PoolEntry {
                 target: Some(target),
                 debug_ctrl: None,
+                generation: 0,
             });
         }
         let entry = guard
@@ -123,21 +129,27 @@ pub mod debug_access {
 
     /// Detach the target connection so a background thread can keep it while
     /// the controller keeps polling. Reattach with [`reattach_target`].
-    pub fn detach_target(id: ConnectionId) -> CoreResult<Connection> {
+    pub fn detach_target(id: ConnectionId) -> CoreResult<(Connection, u64)> {
         let mut entry = take(id)?;
         let target = entry
             .target
             .take()
             .ok_or_else(|| CoreError::Other("debug target session is busy".into()))?;
+        entry.generation += 1;
+        let generation = entry.generation;
         put(id, entry);
-        Ok(target)
+        Ok((target, generation))
     }
 
-    /// Give a detached target connection back to the pool.
-    pub fn reattach_target(id: ConnectionId, connection: Connection) {
+    /// Give a detached target connection back to the pool. A stale thread
+    /// (previous generation) drops its connection instead of overwriting
+    /// the slot of the live session.
+    pub fn reattach_target(id: ConnectionId, connection: Connection, generation: u64) {
         if let Ok(mut guard) = POOL.lock() {
             if let Some(entry) = guard.get_mut(&id) {
-                entry.target = Some(connection);
+                if entry.generation == generation {
+                    entry.target = Some(connection);
+                }
             }
         }
     }
@@ -197,6 +209,7 @@ pub mod debug_access {
             PoolEntry {
                 target: Some(target),
                 debug_ctrl: Some(ctrl),
+                generation: 0,
             },
         );
         Ok((target_result?, ctrl_result?))

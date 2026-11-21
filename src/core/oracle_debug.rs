@@ -603,14 +603,14 @@ fn continue_probe(
     let mut pause = if let Some(source) = maybe_source {
         // Run the block on the target while polling the controller for the
         // first suspension (Probe reports the interpreter-start pause).
-        let target = debug_access::detach_target(id)?;
+        let (target, gen) = detach_target_with_retry(id)?;
         let join = std::thread::spawn(move || {
             let mut target = target;
             let result = target
                 .execute(&source, &[])
                 .map_err(|err| CoreError::Query(format!("target PL/SQL: {err}")));
             let _ = target.execute("BEGIN DBMS_DEBUG.DEBUG_OFF; END;", &[]);
-            crate::core::oracle_pool::debug_access::reattach_target(id, target);
+            crate::core::oracle_pool::debug_access::reattach_target(id, target, gen);
             result
         });
 
@@ -1262,6 +1262,25 @@ static FINISHED: LazyLock<Mutex<HashMap<ConnectionId, std::sync::Arc<RunState>>>
 
 /// Launch the instrumented block (if staged) and wait for the next pause.
 #[cfg(feature = "oracle")]
+/// Detach the target connection, waiting up to ~5s while a previous run's
+/// thread finishes dying (Stop + start_prep's STOP should kill it quickly).
+fn detach_target_with_retry(id: ConnectionId) -> CoreResult<(oracle::Connection, u64)> {
+    use super::oracle_pool::debug_access;
+    for _ in 0..25 {
+        match debug_access::detach_target(id) {
+            Ok(pair) => return Ok(pair),
+            Err(CoreError::Other(text)) if text.contains("busy") => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(CoreError::Other(
+        "debug target session is busy — the previous block is still running; try again in a moment"
+            .into(),
+    ))
+}
+
 fn instrumented_launch(
     request: &DebugEngineRequest,
     id: ConnectionId,
@@ -1334,7 +1353,7 @@ fn instrumented_launch(
                     "debug: block staged, {} chars, pipe {pipe}",
                     instrumented.len()
                 );
-                let target = debug_access::detach_target(id)?;
+                let (target, gen) = detach_target_with_retry(id)?;
                 let id2 = id;
                 let state = finished.clone();
                 std::thread::spawn(move || {
@@ -1392,7 +1411,7 @@ fn instrumented_launch(
                         }
                     }
                     state.finished.store(true, Ordering::SeqCst);
-                    crate::core::oracle_pool::debug_access::reattach_target(id2, target);
+                    crate::core::oracle_pool::debug_access::reattach_target(id2, target, gen);
                 });
                 log.push("block running under instrumentation".into());
             }
