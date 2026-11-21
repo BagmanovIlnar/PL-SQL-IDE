@@ -3180,7 +3180,7 @@ fn ribbon(app: &App) -> Element<'_, Message> {
 
 /// Spinner frames shown while a Connect attempt is in flight (ASCII —
 /// guaranteed glyphs in any font, unlike braille/dots).
-const CONNECT_SPINNER: [char; 4] = ['|', '/', '-', r'\'];
+const CONNECT_SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 
 fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Message> {
     let selected = app.selected_connection == Some(profile.id);
@@ -3203,13 +3203,11 @@ fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Me
     } else {
         text(" ").size(12)
     };
-    let body: Element<'static, Message> = row![
-        container(spinner).width(14).center_x(14),
-        label_text,
-    ]
-    .spacing(4)
-    .align_y(Vertical::Center)
-    .into();
+    let body: Element<'static, Message> =
+        row![container(spinner).width(14).center_x(14), label_text,]
+            .spacing(4)
+            .align_y(Vertical::Center)
+            .into();
     button(container(body).width(Fill).align_x(Horizontal::Left))
         .width(Fill)
         .padding(Padding::from([8, 10]))
