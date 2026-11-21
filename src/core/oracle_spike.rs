@@ -105,6 +105,7 @@ fn run_oracle_spike_blocking(
     let started = std::time::Instant::now();
     let sql = request
         .sql
+        .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "select 1 as value from dual".to_string());
 
@@ -134,8 +135,46 @@ fn run_oracle_spike_blocking(
         return cancel_long_query(&connection, started);
     }
 
+    // SELECT/WITH go through the query path; everything else (PL/SQL
+    // anonymous blocks, DML) must use execute — query() rejects non-selects.
+    // ponytail: leading `--` comments only; /* */ blocks in tests are rare.
+    let head = sql
+        .trim_start()
+        .lines()
+        .skip_while(|l| l.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    let is_query = head.starts_with("SELECT") || head.starts_with("WITH");
+    let (columns, values, message) = if !is_query {
+        connection
+            .execute(&sql, &[])
+            .map_err(|err| CoreError::Query(err.to_string()))?;
+        info!("oracle statement executed");
+        (Vec::new(), Vec::new(), "statement executed".to_string())
+    } else {
+        fetch_query_rows(&connection, &sql, &request)?
+    };
+
+    Ok(OracleSpikeResult {
+        connected: true,
+        cancelled: false,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        columns,
+        rows: values,
+        message,
+    })
+}
+
+/// Run a SELECT and collect up to the row cap, dropping the paging helper
+/// column added by the app's ROWNUM wrapper.
+fn fetch_query_rows(
+    connection: &Connection,
+    sql: &str,
+    request: &OracleSpikeRequest,
+) -> CoreResult<(Vec<String>, Vec<Vec<String>>, String)> {
     let rows = connection
-        .query(&sql, &[])
+        .query(sql, &[])
         .map_err(|err| CoreError::Query(err.to_string()))?;
 
     info!("oracle query executing");
@@ -180,15 +219,7 @@ fn run_oracle_spike_blocking(
     }
 
     info!(rows = values.len(), "oracle query finished");
-
-    Ok(OracleSpikeResult {
-        connected: true,
-        cancelled: false,
-        elapsed_ms: started.elapsed().as_millis() as u64,
-        columns,
-        rows: values,
-        message: "query completed".into(),
-    })
+    Ok((columns, values, "query completed".to_string()))
 }
 
 fn cancel_long_query(
