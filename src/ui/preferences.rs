@@ -84,7 +84,7 @@ impl PreferencesSection {
 
     /// All sections currently registered in Preferences.
     pub fn all() -> &'static [Self] {
-        &[Self::UserInterface, Self::Oracle]
+        &[Self::UserInterface, Self::Oracle, Self::Postgres]
     }
 }
 
