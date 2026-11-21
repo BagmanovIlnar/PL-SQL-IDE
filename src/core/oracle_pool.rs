@@ -4,6 +4,7 @@
 //! opening a one-shot spike connection every time.
 
 use std::collections::HashMap;
+use std::time::Duration;
 use std::sync::{LazyLock, Mutex};
 
 use super::connection_profile::ConnectionProfile;
@@ -149,12 +150,20 @@ pub mod debug_access {
     /// (previous generation) drops its connection instead of overwriting
     /// the slot of the live session.
     pub fn reattach_target(id: ConnectionId, connection: Connection, generation: u64) {
-        if let Ok(mut guard) = POOL.lock() {
-            if let Some(entry) = guard.get_mut(&id) {
-                if entry.generation == generation {
-                    entry.target = Some(connection);
+        // The engine's polling loop holds the entry OUT of the map for up to
+        // ~1s per poll (pipe receive timeout) — retry instead of dropping
+        // the connection when the slot is momentarily absent (that exact
+        // race left the target detached forever → "target session busy").
+        for _ in 0..40 {
+            if let Ok(mut guard) = POOL.lock() {
+                if let Some(entry) = guard.get_mut(&id) {
+                    if entry.generation == generation {
+                        entry.target = Some(connection);
+                    }
+                    return;
                 }
             }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 

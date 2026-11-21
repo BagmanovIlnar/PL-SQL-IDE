@@ -1099,13 +1099,17 @@ fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEv
         // a purge; a generation-guarded pool would be the full fix.
         if let Ok(guard) = LAST_PIPE.lock() {
             if let Some(old) = guard.get(&id).cloned() {
+                // PURGE FIRST, THEN send STOP — purging after the send
+                // deletes the STOP before the target reads it, leaving the
+                // block blocked on its receive loop forever (busy forever).
                 let _ = debug_access::with_ctrl_mut(id, |ctrl| {
                     ctrl.execute(
                         &format!(
-                            "DECLARE m VARCHAR2(100); BEGIN SYS.DBMS_PIPE.PACK_MESSAGE('STOP'); \
-                             m := SYS.DBMS_PIPE.SEND_MESSAGE('{old}_C'); \
+                            "DECLARE m VARCHAR2(100); BEGIN \
                              SYS.DBMS_PIPE.PURGE('{old}_E'); \
-                             SYS.DBMS_PIPE.PURGE('{old}_C'); END;"
+                             SYS.DBMS_PIPE.PURGE('{old}_C'); \
+                             SYS.DBMS_PIPE.PACK_MESSAGE('STOP'); \
+                             m := SYS.DBMS_PIPE.SEND_MESSAGE('{old}_C'); END;"
                         ),
                         &[],
                     )
@@ -1165,13 +1169,16 @@ fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEv
             if let Ok(mut guard) = SESSION_STATE.lock() {
                 if let Some(session) = guard.get(&id) {
                     if let Some(pipe) = &session.pipe {
+                        // Same ordering as start_prep: purge first, the
+                        // STOP must survive in the pipe for the target.
                         let _ = debug_access::with_ctrl_mut(id, |ctrl| {
                             ctrl.execute(
                                 &format!(
-                                    "DECLARE m VARCHAR2(100); BEGIN SYS.DBMS_PIPE.PACK_MESSAGE('STOP'); \
-                                     m := SYS.DBMS_PIPE.SEND_MESSAGE('{pipe}_C'); \
+                                    "DECLARE m VARCHAR2(100); BEGIN \
                                      SYS.DBMS_PIPE.PURGE('{pipe}_E'); \
-                                     SYS.DBMS_PIPE.PURGE('{pipe}_C'); END;"
+                                     SYS.DBMS_PIPE.PURGE('{pipe}_C'); \
+                                     SYS.DBMS_PIPE.PACK_MESSAGE('STOP'); \
+                                     m := SYS.DBMS_PIPE.SEND_MESSAGE('{pipe}_C'); END;"
                                 ),
                                 &[],
                             )
@@ -1504,9 +1511,14 @@ fn wait_pause(
         let event = debug_access::with_ctrl_mut(id, |ctrl| {
             let mut stmt = ctrl
                 .statement(&format!(
+                    // ponytail: timeout must return a sentinel, not NULL —
+                    // a NULL CLOB OUT bind raises "NULL value found" in
+                    // rust-oracle and killed the wait loop on its first
+                    // quiet second, so "program finished" was never seen.
                     "DECLARE t INTEGER; m VARCHAR2(32767); BEGIN \
                      t := SYS.DBMS_PIPE.RECEIVE_MESSAGE('{pipe}_E', 1); \
-                     IF t = 0 THEN SYS.DBMS_PIPE.UNPACK_MESSAGE(m); END IF; \
+                     IF t = 0 THEN SYS.DBMS_PIPE.UNPACK_MESSAGE(m); \
+                     ELSE m := '~idle~'; END IF; \
                      :out := m; END;"
                 ))
                 .build()
@@ -1524,6 +1536,7 @@ fn wait_pause(
             Ok::<String, CoreError>(out)
         });
         match event {
+            Ok(out) if out == "~idle~" => {}
             Ok(out) => {
                 for line in out.lines() {
                     if let Some(entry) = line.strip_prefix("V ") {
