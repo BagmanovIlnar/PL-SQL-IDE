@@ -3273,11 +3273,11 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
     opaque(
         stack![
             backdrop,
-            container(card)
+            opaque(container(card)
                 .width(Fill)
                 .height(Fill)
                 .center_x(Fill)
-                .center_y(Fill),
+                .center_y(Fill)),
         ]
         .width(Fill)
         .height(Fill),
@@ -3334,11 +3334,11 @@ fn group_name_modal(app: &App) -> Element<'_, Message> {
                 .width(Fill)
                 .height(Fill)
                 .style(|_| ui_theme::modal_backdrop()),
-            container(card)
+            opaque(container(card)
                 .width(Fill)
                 .height(Fill)
                 .center_x(Fill)
-                .center_y(Fill),
+                .center_y(Fill)),
         ]
         .width(Fill)
         .height(Fill),
@@ -3381,11 +3381,11 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
     opaque(
         stack![
             backdrop,
-            container(card)
+            opaque(container(card)
                 .width(Fill)
                 .height(Fill)
                 .center_x(Fill)
-                .center_y(Fill),
+                .center_y(Fill)),
         ]
         .width(Fill)
         .height(Fill),
@@ -3429,11 +3429,11 @@ fn error_modal(app: &App) -> Element<'_, Message> {
     opaque(
         stack![
             backdrop,
-            container(card)
+            opaque(container(card)
                 .width(Fill)
                 .height(Fill)
                 .center_x(Fill)
-                .center_y(Fill),
+                .center_y(Fill)),
         ]
         .width(Fill)
         .height(Fill),
@@ -3938,11 +3938,11 @@ fn close_tab_confirm_modal(app: &App) -> Element<'_, Message> {
     opaque(
         stack![
             backdrop,
-            container(card)
+            opaque(container(card)
                 .width(Fill)
                 .height(Fill)
                 .center_x(Fill)
-                .center_y(Fill),
+                .center_y(Fill)),
         ]
         .width(Fill)
         .height(Fill),

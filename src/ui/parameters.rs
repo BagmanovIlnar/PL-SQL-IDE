@@ -875,11 +875,11 @@ pub fn value_editor_modal(draft: &ValueEditorDraft) -> Element<'_, ParamMessage>
     opaque(
         stack![
             backdrop,
-            container(card)
+            opaque(container(card)
                 .width(Fill)
                 .height(Fill)
                 .center_x(Fill)
-                .center_y(Fill),
+                .center_y(Fill)),
         ]
         .width(Fill)
         .height(Fill),

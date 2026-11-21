@@ -463,11 +463,11 @@ pub fn preferences_modal(state: &PreferencesState) -> Element<'_, PreferencesMes
     let preferences_layer = opaque(
         stack![
             backdrop,
-            container(card)
+            opaque(container(card)
                 .width(Fill)
                 .height(Fill)
                 .center_x(Fill)
-                .center_y(Fill),
+                .center_y(Fill)),
         ]
         .width(Fill)
         .height(Fill),

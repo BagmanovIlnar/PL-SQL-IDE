@@ -464,11 +464,11 @@ pub fn cell_editor_modal(draft: &CellEditorDraft) -> Element<'_, ResultMessage> 
     opaque(
         stack![
             backdrop,
-            container(card)
+            opaque(container(card)
                 .width(Fill)
                 .height(Fill)
                 .center_x(Fill)
-                .center_y(Fill),
+                .center_y(Fill)),
         ]
         .width(Fill)
         .height(Fill),

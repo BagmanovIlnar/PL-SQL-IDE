@@ -491,11 +491,11 @@ fn compiler_dialog_modal(
     opaque(
         stack![
             backdrop,
-            container(card)
+            opaque(container(card)
                 .width(Fill)
                 .height(Fill)
                 .center_x(Fill)
-                .center_y(Fill),
+                .center_y(Fill)),
         ]
         .width(Fill)
         .height(Fill),
