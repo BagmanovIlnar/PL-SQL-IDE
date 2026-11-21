@@ -3868,16 +3868,6 @@ fn worksheet_toolbar(app: &App) -> Element<'static, Message> {
         !app.busy && app.active_worksheet_profile().is_some(),
         Message::MenuExecute,
     );
-    // Test: while a debug session runs the block, script execution is off —
-    // it is already executing under the debugger.
-    let execute_test = toolbar_icon_button(
-        play().size(14),
-        i18n::t("ribbon.execute"),
-        !app.busy
-            && !app.debug_session.active
-            && app.active_worksheet_profile().is_some(),
-        Message::MenuExecute,
-    );
     let stop = toolbar_icon_button(
         square().size(14),
         i18n::t("toolbar.stop"),
@@ -3888,8 +3878,7 @@ fn worksheet_toolbar(app: &App) -> Element<'static, Message> {
     );
     let bar = match kind {
         Some(WindowKind::Sql | WindowKind::Command) => row![execute, stop],
-        // Test: debug controls plus script Execute/Stop (run without debugger).
-        Some(WindowKind::Test) => row![debug, toolbar_divider(), execute_test, stop],
+        // Test and code windows: debug controls only — no script buttons.
         _ => row![debug],
     };
     container(bar.spacing(6).align_y(Vertical::Center))
