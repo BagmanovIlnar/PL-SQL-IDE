@@ -317,6 +317,8 @@
         "role.normal": "Normal",
         "dialog.connection.group": "Group",
         "dialog.group.add": "New group",
+        "dialog.group.parent": "Parent group",
+        "dialog.group.no_parent": "(no group)",
         "dialog.group.name": "Group name",
         "dialog.group.save": "Save",
         "dialog.group.cancel": "Cancel",

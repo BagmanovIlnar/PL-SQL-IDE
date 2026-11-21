@@ -317,6 +317,8 @@
         "role.normal": "Обычный",
         "dialog.connection.group": "Группа",
         "dialog.group.add": "Новая группа",
+        "dialog.group.parent": "Родительская группа",
+        "dialog.group.no_parent": "(без родителя)",
         "dialog.group.name": "Название группы",
         "dialog.group.save": "Сохранить",
         "dialog.group.cancel": "Отмена",

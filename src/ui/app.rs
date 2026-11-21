@@ -515,6 +515,8 @@ enum Message {
     AddGroup,
     EditGroup,
     GroupDraftChanged(String),
+    /// Parent group selected in the Add-group dialog.
+    GroupDraftParentChanged(String),
     GroupDialogSave,
     GroupDialogCancel,
     /// Attempt to open a live session for the selected Connections profile.
@@ -1450,9 +1452,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::AddGroup => {
+            // New group nests under the selected group (if any).
             app.group_draft = Some(GroupDraft {
                 original: None,
                 name: String::new(),
+                parent: app.selected_group.clone().unwrap_or_default(),
             });
             Task::none()
         }
@@ -1460,7 +1464,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             if let Some(name) = app.selected_group.clone() {
                 app.group_draft = Some(GroupDraft {
                     original: Some(name.clone()),
-                    name,
+                    name: group_leaf(&name).to_string(),
+                    parent: group_parent(&name).unwrap_or_default().to_string(),
                 });
             }
             Task::none()
@@ -1471,30 +1476,68 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::GroupDraftParentChanged(value) => {
+            if let Some(draft) = &mut app.group_draft {
+                draft.parent = value;
+            }
+            Task::none()
+        }
         Message::GroupDialogSave => {
             if let Some(draft) = app.group_draft.take() {
                 let name = draft.name.trim().to_string();
+                let path = if draft.parent.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{name}", draft.parent)
+                };
                 match draft.original {
                     None => {
-                        if !name.is_empty() && !app.groups.contains(&name) {
-                            app.groups.push(name);
+                        if !name.is_empty()
+                            && (draft.parent.is_empty() || app.groups.contains(&draft.parent))
+                            && !app.groups.contains(&path)
+                        {
+                            app.groups.push(path);
                             app.persist_connections();
                         }
                     }
                     Some(old) => {
-                        if !name.is_empty() && (name == old || !app.groups.contains(&name)) {
+                        let parent = group_parent(&old).unwrap_or_default().to_string();
+                        let new = if parent.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{parent}/{name}")
+                        };
+                        if !name.is_empty() && (new == old || !app.groups.contains(&new)) {
                             if let Some(slot) = app.groups.iter_mut().find(|g| **g == old) {
-                                *slot = name.clone();
+                                *slot = new.clone();
+                            }
+                            // Rename descendants and re-path member connections.
+                            let old_prefix = format!("{old}/");
+                            let new_prefix = format!("{new}/");
+                            for g in &mut app.groups {
+                                if g.starts_with(&old_prefix) {
+                                    *g = format!("{new_prefix}{}", &g[old_prefix.len()..]);
+                                }
                             }
                             for profile in &mut app.connections {
                                 if profile.group == old {
-                                    profile.group = name.clone();
+                                    profile.group = new.clone();
+                                } else if profile.group.starts_with(&old_prefix) {
+                                    profile.group = format!(
+                                        "{new_prefix}{}",
+                                        &profile.group[old_prefix.len()..]
+                                    );
                                 }
                             }
-                            if app.collapsed_groups.remove(&old) {
-                                app.collapsed_groups.insert(name.clone());
-                            }
-                            app.selected_group = Some(name);
+                            let collapsed_moved: Vec<String> = app
+                                .collapsed_groups
+                                .iter()
+                                .filter(|g| g.starts_with(&old_prefix))
+                                .map(|g| format!("{new_prefix}{}", &g[old_prefix.len()..]))
+                                .collect();
+                            app.collapsed_groups.retain(|g| !g.starts_with(&old_prefix));
+                            app.collapsed_groups.extend(collapsed_moved);
+                            app.selected_group = Some(new);
                             app.persist_connections();
                         }
                     }
@@ -1520,13 +1563,16 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::DeleteGroup => {
             if let Some(name) = app.selected_group.take() {
-                app.groups.retain(|group| *group != name);
+                // Delete the group and its subgroups (cascade); members go ungrouped.
+                let prefix = format!("{name}/");
+                app.groups.retain(|g| g != &name && !g.starts_with(&prefix));
                 for profile in &mut app.connections {
-                    if profile.group == name {
+                    if profile.group == name || profile.group.starts_with(&prefix) {
                         profile.group.clear();
                     }
                 }
-                app.collapsed_groups.remove(&name);
+                app.collapsed_groups
+                    .retain(|g| g != &name && !g.starts_with(&prefix));
                 app.persist_connections();
                 app.metrics = i18n::t_args("status.group_deleted", &[("name", name.as_str())]);
             }
@@ -3120,7 +3166,43 @@ fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Me
 }
 
 /// Collapsible sidebar group header: chevron + name + member count.
-fn group_header(app: &App, name: &str) -> Element<'static, Message> {
+/// Parent path of a group path ("A/B" → "A", "A" → None).
+fn group_parent(path: &str) -> Option<&str> {
+    path.rsplit_once('/').map(|(p, _)| p)
+}
+
+/// Leaf name of a group path ("A/B" → "B").
+fn group_leaf(path: &str) -> &str {
+    path.rsplit_once('/').map(|(_, l)| l).unwrap_or(path)
+}
+
+/// Render one nesting level of the group tree into `out`.
+fn push_group_level(
+    out: &mut Vec<Element<'static, Message>>,
+    app: &App,
+    parent: Option<&str>,
+    depth: usize,
+) {
+    for group in app.groups.iter().filter(|g| group_parent(g) == parent) {
+        out.push(group_header(app, group, depth));
+        if !app.collapsed_groups.contains(group.as_str()) {
+            let indent = 16.0 * (depth + 1) as f32;
+            for profile in app.connections.iter().filter(|p| p.group == *group) {
+                out.push(
+                    container(connection_row(app, profile))
+                        .padding(Padding {
+                            left: indent,
+                            ..Padding::ZERO
+                        })
+                        .into(),
+                );
+            }
+            push_group_level(out, app, Some(group.as_str()), depth + 1);
+        }
+    }
+}
+
+fn group_header(app: &App, name: &str, depth: usize) -> Element<'static, Message> {
     let collapsed = app.collapsed_groups.contains(name);
     let members = app.connections.iter().filter(|p| p.group == name).count();
     let icon = if collapsed {
@@ -3129,14 +3211,15 @@ fn group_header(app: &App, name: &str) -> Element<'static, Message> {
         chevron_down().size(12)
     };
     let name = name.to_string();
+    let leaf = group_leaf(&name).to_string();
     let selected = app.selected_group.as_deref() == Some(name.as_str());
     let count = text(format!("({members})"))
         .size(11)
         .color(ui_theme::current().muted);
-    button(
+    let header = button(
         row![
             icon.color(ui_theme::current().muted),
-            text(name.clone()).size(11),
+            text(leaf).size(11),
             count,
         ]
         .spacing(4)
@@ -3145,27 +3228,29 @@ fn group_header(app: &App, name: &str) -> Element<'static, Message> {
     .width(Fill)
     .padding(Padding::from([6, 6]))
     .style(move |_, status| connection_row_style(selected, ConnectionStatus::Unknown, status))
-    .on_press(Message::SelectGroup(name))
-    .into()
+    .on_press(Message::SelectGroup(name));
+    if depth == 0 {
+        header.into()
+    } else {
+        container(header)
+            .padding(Padding {
+                left: 16.0 * depth as f32,
+                ..Padding::ZERO
+            })
+            .into()
+    }
 }
 
 fn side_browser(app: &App) -> Element<'_, Message> {
-    let mut list = column![].spacing(2);
-    // Groups in persisted order, then ungrouped connections at the end.
-    for group in &app.groups {
-        list = list.push(group_header(app, group));
-        if !app.collapsed_groups.contains(group) {
-            for profile in app.connections.iter().filter(|p| &p.group == group) {
-                // Indent group members so nesting is visible.
-                list = list.push(container(connection_row(app, profile)).padding(Padding {
-                    left: 16.0,
-                    ..Padding::ZERO
-                }));
-            }
-        }
-    }
+    let mut items: Vec<Element<'static, Message>> = Vec::new();
+    // Group tree by path ("Parent/Child"), then ungrouped connections.
+    push_group_level(&mut items, app, None, 0);
     for profile in app.connections.iter().filter(|p| p.group.is_empty()) {
-        list = list.push(connection_row(app, profile));
+        items.push(connection_row(app, profile));
+    }
+    let mut list = column![].spacing(2);
+    for item in items {
+        list = list.push(item);
     }
 
     let connections = column![
@@ -3502,6 +3587,8 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
 struct GroupDraft {
     original: Option<String>,
     name: String,
+    /// Parent group path (empty = top level); fixed on rename.
+    parent: String,
 }
 
 /// Modal asking for a new (or renamed) sidebar group name.
@@ -3509,14 +3596,36 @@ fn group_name_modal(app: &App) -> Element<'_, Message> {
     let draft = app.group_draft.clone().unwrap_or(GroupDraft {
         original: None,
         name: String::new(),
+        parent: String::new(),
     });
     let title_key = if draft.original.is_some() {
         "dialog.group.rename"
     } else {
         "dialog.group.add"
     };
+    // Parent picker (new groups only): defaults to the selected group.
+    let parent_pick = if draft.original.is_none() {
+        let picker = pick_list(
+            app.groups.clone(),
+            (!draft.parent.is_empty()).then(|| draft.parent.clone()),
+            Message::GroupDraftParentChanged,
+        )
+        .width(Fill)
+        .placeholder(i18n::t("dialog.group.no_parent"))
+        .text_size(12);
+        column![
+            text(i18n::t("dialog.group.parent"))
+                .size(11)
+                .color(ui_theme::current().muted),
+            picker,
+        ]
+        .spacing(4)
+    } else {
+        column![]
+    };
     let form = column![
         text(i18n::t(title_key)).size(18),
+        parent_pick,
         labeled_input(
             i18n::t("dialog.group.name"),
             &draft.name,
@@ -4215,6 +4324,19 @@ fn completion_popup_origin(
     };
     let left = (24.0 + caret_col * 7.8).min(700.0);
     (top, left)
+}
+
+#[cfg(test)]
+mod group_path_tests {
+    use super::{group_leaf, group_parent};
+
+    #[test]
+    fn parses_paths() {
+        assert_eq!(group_parent("A/B/C"), Some("A/B"));
+        assert_eq!(group_parent("A"), None);
+        assert_eq!(group_leaf("A/B/C"), "C");
+        assert_eq!(group_leaf("A"), "A");
+    }
 }
 
 #[cfg(test)]
