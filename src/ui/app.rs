@@ -1773,7 +1773,16 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.debug_system = system;
                 app.apply_debug_command(DebugCommand::Start(system))
             }
-            DebugToolbarMessage::Run => app.apply_debug_command(DebugCommand::Run),
+            DebugToolbarMessage::Run => {
+                let owns_debug = app.debug_session.active
+                    && app.debug_session.tab == Some(app.active_tab);
+                if owns_debug {
+                    app.apply_debug_command(DebugCommand::Run)
+                } else {
+                    // No debug session here — run the block fully, no debugger.
+                    run_spike(app, FetchMode::Execute)
+                }
+            }
             DebugToolbarMessage::StepInto => app.apply_debug_command(DebugCommand::StepInto),
             DebugToolbarMessage::StepOver => app.apply_debug_command(DebugCommand::StepOver),
             DebugToolbarMessage::StepOut => app.apply_debug_command(DebugCommand::StepOut),
