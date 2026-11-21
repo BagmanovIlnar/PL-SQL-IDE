@@ -1,5 +1,6 @@
 //! Application core: shared DB types and Phase 0 connection spikes.
 
+pub mod command_history;
 pub mod connection_profile;
 pub mod connections_store;
 pub mod data_changes;
