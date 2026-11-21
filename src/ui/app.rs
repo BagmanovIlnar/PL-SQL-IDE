@@ -1194,10 +1194,16 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
-        Message::CommandFocus => focus_command_input(),
+        Message::CommandFocus => {
+            tracing::info!(target: "command", "focus: command window opened");
+            focus_command_input()
+        }
         Message::ConsoleAction(action) => {
             // Console output is read-only: selection/scroll apply, edits drop.
             let clicked = matches!(action, Action::Click(_));
+            if clicked {
+                tracing::info!(target: "command", "click on console — bouncing focus to SQL> input");
+            }
             if !action.is_edit() {
                 if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                     sheet.command_dialog_view.perform(action);
@@ -1489,7 +1495,10 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.metrics = i18n::t("status.cancelled");
             Task::none()
         }
-        Message::CommandTab(false) => focus_command_input(),
+        Message::CommandTab(false) => {
+            tracing::info!(target: "command", "focus: tab switch to dialog");
+            focus_command_input()
+        }
         Message::CommandTab(edit) => {
             if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                 sheet.command_edit = edit;
@@ -1497,12 +1506,14 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::CommandInput(value) => {
+            tracing::info!(target: "command", chars = value.chars().count(), "input keystroke reached SQL> line");
             if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                 sheet.command_input = value;
             }
             Task::none()
         }
         Message::CommandSubmit => {
+            tracing::info!(target: "command", "submit: Enter fired on SQL> line");
             let cmd = {
                 let banner = command_banner(app);
                 let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
