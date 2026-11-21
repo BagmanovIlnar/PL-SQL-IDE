@@ -12,7 +12,6 @@ use iced_fonts::lucide::circle_help;
 
 use crate::core::postgres_connection_prefs::{self as pg_prefs, PostgresConnectionPrefs, SslMode};
 use crate::ui::i18n;
-use crate::ui::theme;
 
 // Compact control metrics, matching the Oracle prefs forms.
 const LABEL_SIZE: f32 = 11.0;

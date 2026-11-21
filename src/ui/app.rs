@@ -1,5 +1,6 @@
 //! IDE shell: menu, Connections/Objects, worksheets, completion, connection modal.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,10 +14,10 @@ use iced::widget::operation::focus as focus_widget;
 use iced::widget::text_editor::{Action, Binding, Content, Edit, Motion};
 use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, row, rule, scrollable,
-    stack, text, text_editor, text_input, tooltip, Space,
+    stack, text, text_editor, text_input, tooltip, Responsive, Space,
 };
 use iced::{
-    Background, Color, Element, Event, Fill, Font, Padding, Point, Subscription, Task, Theme,
+    Background, Color, Element, Event, Fill, Font, Padding, Point, Size, Subscription, Task, Theme,
 };
 use iced_fonts::lucide::{
     chevron_down, chevron_right, database, folder_plus, pencil, play, plug, plus, square, trash,
@@ -36,8 +37,17 @@ const EDITOR_LINE_HEIGHT: f32 = 20.0;
 /// Padding around editor text; gutter top padding matches this.
 const EDITOR_PADDING: f32 = 5.0;
 
-/// How many line numbers to render in the virtualized gutter window.
-const GUTTER_VISIBLE_LINES: usize = 120;
+/// Rough advance width of one monospace glyph at `EDITOR_TEXT_SIZE`.
+/// ponytail: calibration knob — if gutter numbers drift from text rows on
+/// long (wrapped) lines, nudge this; real wrap geometry is not exposed by
+/// iced 0.14 text_editor.
+const EDITOR_CHAR_W: f32 = 8.4;
+
+/// Width of the editor's vertical scrollbar strip.
+const SCROLLBAR_W: f32 = 10.0;
+
+/// Minimum height of the editor scrollbar thumb.
+const THUMB_MIN_H: f32 = 40.0;
 
 /// Hit-area thickness of panel resize splitters (logical pixels).
 const SPLITTER_HIT: f32 = 6.0;
@@ -147,6 +157,8 @@ struct Worksheet {
     content: Content,
     /// Vertical scroll offset of the editor, in logical pixels.
     scroll_y: f32,
+    /// Sub-line scroll remainder (fractional lines) for smooth thumb drags.
+    scroll_frac: f32,
     /// Bind / test parameters (SQL Window and Test Window).
     parameters: ParametersPanel,
     /// Result grid of the last executed query (SQL Window).
@@ -431,11 +443,23 @@ struct App {
     debug_system: DebugSystem,
     /// Tab index waiting for Save / Don't save / Cancel before close.
     close_confirm: Option<usize>,
+    /// Editor viewport size captured during layout (Responsive wrapper).
+    editor_viewport: Cell<Size>,
+    /// Max editor scroll (content height − viewport), captured during layout.
+    editor_scroll_max: Cell<f32>,
+    /// True while the editor scrollbar thumb is being dragged.
+    thumb_drag: bool,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     EditorAction(Action),
+    /// Vertical scrollbar thumb pressed (drag starts).
+    EditorThumbPress,
+    /// Thumb dragged; value is the pointer Y inside the scrollbar track.
+    EditorThumbDrag(f32),
+    /// Left button released anywhere (drag ends).
+    EditorThumbRelease,
     /// Any action on a modal's read-only error text: undo the edit, keep selection.
     ModalErrorAction(Action),
     FilterChanged(String),
@@ -603,6 +627,9 @@ impl App {
             var_details: None,
             debug_system: oracle_debugger_prefs::load().default_debug_system,
             close_confirm: None,
+            editor_viewport: Cell::new(Size::ZERO),
+            editor_scroll_max: Cell::new(0.0),
+            thumb_drag: false,
         }
     }
 
@@ -663,6 +690,7 @@ impl App {
             kind,
             content: Content::with_text(kind.template()),
             scroll_y: 0.0,
+            scroll_frac: 0.0,
             parameters: ParametersPanel::default(),
             result: QueryResult::default(),
             connection_id,
@@ -1122,10 +1150,44 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.var_details = None;
             Task::none()
         }
+        Message::EditorThumbPress => {
+            app.thumb_drag = true;
+            Task::none()
+        }
+        Message::EditorThumbRelease => {
+            app.thumb_drag = false;
+            Task::none()
+        }
+        Message::EditorThumbDrag(y) => {
+            if !app.thumb_drag {
+                return Task::none();
+            }
+            let vp = app.editor_viewport.get();
+            let max = app.editor_scroll_max.get();
+            if vp.height <= 0.0 || max <= 1.0 {
+                return Task::none();
+            }
+            let (thumb_h, content_h) = thumb_geometry(max, vp.height);
+            let target = (((y - thumb_h / 2.0) / vp.height) * content_h).clamp(0.0, max);
+            let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
+                return Task::none();
+            };
+            let lines_f = (target - sheet.scroll_y) / EDITOR_LINE_HEIGHT + sheet.scroll_frac;
+            let lines = lines_f.floor();
+            sheet.scroll_frac = lines_f - lines;
+            if lines != 0.0 {
+                sheet.content.perform(Action::Scroll {
+                    lines: lines as i32,
+                });
+            }
+            sheet.scroll_y = (sheet.scroll_y + lines * EDITOR_LINE_HEIGHT).clamp(0.0, max);
+            Task::none()
+        }
         Message::EditorAction(action) => {
             if let Action::Scroll { lines } = &action {
+                let max = app.editor_scroll_max.get();
                 if let Some(scroll_y) = app.active_scroll_y_mut() {
-                    *scroll_y = (*scroll_y + *lines as f32 * EDITOR_LINE_HEIGHT).max(0.0);
+                    *scroll_y = (*scroll_y + *lines as f32 * EDITOR_LINE_HEIGHT).clamp(0.0, max);
                 }
             }
 
@@ -1978,6 +2040,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 
 fn subscription(_app: &App) -> Subscription<Message> {
     iced::event::listen_with(|event, _status, _window| {
+        if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = &event {
+            return Some(Message::EditorThumbRelease);
+        }
         let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
             return None;
         };
@@ -4119,6 +4184,25 @@ fn completion_popup_origin(
 }
 
 #[cfg(test)]
+mod row_offsets_tests {
+    use super::*;
+
+    #[test]
+    fn wraps_long_lines_into_multiple_rows() {
+        // 80-char line at 40 cols = 2 rows; short line = 1 row.
+        let content = Content::with_text(&format!("{}\nshort", "x".repeat(80)));
+        let offsets = row_offsets(&content, 40);
+        assert_eq!(offsets, vec![0.0, 40.0, 60.0]);
+    }
+
+    #[test]
+    fn empty_content_is_one_row() {
+        let offsets = row_offsets(&Content::new(), 40);
+        assert_eq!(offsets, vec![0.0, 20.0]);
+    }
+}
+
+#[cfg(test)]
 mod completion_popup_origin_tests {
     use super::completion_popup_origin;
 
@@ -4216,21 +4300,23 @@ fn gutter_width(line_count: usize) -> f32 {
 }
 
 fn line_number_gutter(
-    line_count: usize,
+    offsets: &[f32],
+    width: f32,
     scroll_y: f32,
+    track_h: f32,
     breakpoints: &HashSet<usize>,
     current_line: Option<usize>,
 ) -> Element<'static, Message> {
-    let line_count = line_count.max(1);
-    let max_first = line_count.saturating_sub(1);
-    let first = ((scroll_y / EDITOR_LINE_HEIGHT).floor() as usize).min(max_first);
-    let last = (first + GUTTER_VISIBLE_LINES).min(line_count);
-    let pixel_offset = scroll_y - first as f32 * EDITOR_LINE_HEIGHT;
-
-    let gutter_width = gutter_width(line_count);
-
+    let viewport_bottom = scroll_y + track_h;
+    // First logical line whose row intersects the viewport.
+    let first = offsets
+        .partition_point(|&top| top <= scroll_y)
+        .saturating_sub(1);
     let mut numbers = column![].spacing(0);
-    for number in (first + 1)..=last {
+    let mut i = first;
+    while i + 1 < offsets.len() && offsets[i] < viewport_bottom {
+        let number = i + 1;
+        let visible_h = (offsets[i + 1].min(viewport_bottom) - offsets[i].max(scroll_y)).max(1.0);
         let has_bp = breakpoints.contains(&number);
         let is_current = current_line == Some(number);
         let marker = if is_current {
@@ -4269,19 +4355,20 @@ fn line_number_gutter(
                 left: 4.0,
             })
             .width(Fill)
-            .height(EDITOR_LINE_HEIGHT)
+            .height(visible_h)
             .style(move |_, status| gutter_line_style(is_current, status))
             .on_press(Message::ToggleBreakpoint(number)),
         );
+        i += 1;
     }
 
     container(container(numbers).padding(Padding {
-        top: (EDITOR_PADDING - pixel_offset).max(0.0),
+        top: EDITOR_PADDING,
         right: 0.0,
         bottom: 0.0,
         left: 0.0,
     }))
-    .width(gutter_width)
+    .width(width)
     .height(Fill)
     .clip(true)
     .style(|_| container::Style {
@@ -4294,6 +4381,71 @@ fn line_number_gutter(
         text_color: Some(ui_theme::current().muted),
         ..container::Style::default()
     })
+    .into()
+}
+
+/// Pixel offset of every logical line (index 0 = 0.0), assuming `wrap_cols`
+/// glyphs per visual row. Approximates the editor's soft wrap; shared by the
+/// gutter and the scrollbar so both stay consistent.
+/// ponytail: glyph-count estimate ignores word-wrap waste; if numbers drift
+/// from long lines, tune EDITOR_CHAR_W (iced 0.14 exposes no real geometry).
+fn row_offsets(content: &Content, wrap_cols: usize) -> Vec<f32> {
+    let mut offsets = Vec::with_capacity(content.line_count() + 1);
+    offsets.push(0.0);
+    for line in content.lines() {
+        let chars = line.text.chars().count().max(1) as f32;
+        let rows = (chars / wrap_cols as f32).ceil();
+        offsets.push(offsets.last().unwrap_or(&0.0) + rows * EDITOR_LINE_HEIGHT);
+    }
+    offsets
+}
+
+/// (thumb height, scrollable content height) of the editor scrollbar.
+fn thumb_geometry(max_scroll: f32, track_h: f32) -> (f32, f32) {
+    let content_h = max_scroll + track_h;
+    let thumb_h = (track_h * track_h / content_h).clamp(THUMB_MIN_H, track_h.max(THUMB_MIN_H));
+    (thumb_h, content_h)
+}
+
+/// Vertical scrollbar strip along the editor's right edge.
+/// Drag the thumb (or just move within it after press) to scroll.
+fn editor_scrollbar(scroll_y: f32, max_scroll: f32, track_h: f32) -> Element<'static, Message> {
+    let (thumb_h, _) = thumb_geometry(max_scroll, track_h);
+    let frac = if max_scroll > 0.0 {
+        (scroll_y / max_scroll).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let above = (track_h - thumb_h).max(0.0) * frac;
+    let thumb = container(Space::new().width(0).height(0))
+        .width(4)
+        .height(thumb_h)
+        .style(|_| container::Style {
+            background: Some(Background::Color(ui_theme::current().muted)),
+            border: Border {
+                radius: 2.0.into(),
+                ..Border::default()
+            },
+            ..container::Style::default()
+        });
+    let inner = if max_scroll > 1.0 {
+        column![
+            Space::new().width(Fill).height(above),
+            thumb,
+            Space::new().width(Fill).height(Fill),
+        ]
+    } else {
+        column![]
+    };
+    mouse_area(
+        container(inner)
+            .width(SCROLLBAR_W)
+            .height(Fill)
+            .style(|_| container::Style::default()),
+    )
+    .on_press(Message::EditorThumbPress)
+    .on_move(|p| Message::EditorThumbDrag(p.y))
+    .on_release(Message::EditorThumbRelease)
     .into()
 }
 
@@ -4337,58 +4489,82 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
     } else {
         iced::highlighter::Theme::InspiredGitHub
     };
-    let editor = text_editor(&sheet.content)
-        .id(EDITOR_ID)
-        .height(Fill)
-        .font(Font::MONOSPACE)
-        .size(EDITOR_TEXT_SIZE)
-        .line_height(iced::widget::text::LineHeight::Absolute(
-            EDITOR_LINE_HEIGHT.into(),
-        ))
-        .padding(EDITOR_PADDING)
-        .highlight(syntax, highlighter_theme)
-        .style(|_, status| editor_style(status))
-        .key_binding(move |key_press| {
-            if completion_open {
-                match key_press.key.as_ref() {
-                    Key::Named(Named::Enter) => {
-                        return Some(Binding::Custom(Message::ApplySelectedCompletion));
-                    }
-                    Key::Named(Named::ArrowUp) => {
-                        return Some(Binding::Custom(Message::CompletionNavigate(-1)));
-                    }
-                    Key::Named(Named::ArrowDown) => {
-                        return Some(Binding::Custom(Message::CompletionNavigate(1)));
-                    }
-                    Key::Named(Named::Escape) => {
-                        return Some(Binding::Custom(Message::DismissCompletion));
-                    }
-                    _ => {}
-                }
-            }
-            Binding::from_key_press(key_press)
-        })
-        .on_action(Message::EditorAction);
-
     let breakpoints = &sheet.breakpoints;
+    let viewport_cell = &app.editor_viewport;
+    let scroll_max_cell = &app.editor_scroll_max;
     let debug_here = app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
     let current_line = if debug_here {
         app.debug_session.current_line
     } else {
         None
     };
-    let editor_body = row![
-        line_number_gutter(line_count, scroll_y, breakpoints, current_line),
-        container(editor)
-            .width(Fill)
+    let editor_body = Responsive::new(move |vp| {
+        let gutter_w = gutter_width(line_count);
+        let editor_w = vp.width - gutter_w - SCROLLBAR_W;
+        let wrap_cols =
+            (((editor_w - 2.0 * EDITOR_PADDING) / EDITOR_CHAR_W).floor() as usize).max(8);
+        // Per-line pixel offsets under the estimated soft wrap — single source
+        // of truth for gutter alignment and the scrollbar thumb.
+        let offsets = row_offsets(&sheet.content, wrap_cols);
+        let content_h = offsets.last().copied().unwrap_or(0.0) + 2.0 * EDITOR_PADDING;
+        let max_scroll = (content_h - vp.height).max(0.0);
+        viewport_cell.set(vp);
+        scroll_max_cell.set(max_scroll);
+        let scroll_y = scroll_y.min(max_scroll);
+        let editor = text_editor(&sheet.content)
+            .id(EDITOR_ID)
             .height(Fill)
-            .style(|_| container::Style {
-                background: Some(Background::Color(ui_theme::current().panel_bg)),
-                ..container::Style::default()
-            }),
-    ]
-    .height(Fill)
-    .width(Fill);
+            .font(Font::MONOSPACE)
+            .size(EDITOR_TEXT_SIZE)
+            .line_height(iced::widget::text::LineHeight::Absolute(
+                EDITOR_LINE_HEIGHT.into(),
+            ))
+            .padding(EDITOR_PADDING)
+            .highlight(syntax, highlighter_theme)
+            .style(|_, status| editor_style(status))
+            .key_binding(move |key_press| {
+                if completion_open {
+                    match key_press.key.as_ref() {
+                        Key::Named(Named::Enter) => {
+                            return Some(Binding::Custom(Message::ApplySelectedCompletion));
+                        }
+                        Key::Named(Named::ArrowUp) => {
+                            return Some(Binding::Custom(Message::CompletionNavigate(-1)));
+                        }
+                        Key::Named(Named::ArrowDown) => {
+                            return Some(Binding::Custom(Message::CompletionNavigate(1)));
+                        }
+                        Key::Named(Named::Escape) => {
+                            return Some(Binding::Custom(Message::DismissCompletion));
+                        }
+                        _ => {}
+                    }
+                }
+                Binding::from_key_press(key_press)
+            })
+            .on_action(Message::EditorAction);
+        row![
+            line_number_gutter(
+                &offsets,
+                gutter_w,
+                scroll_y,
+                vp.height,
+                breakpoints,
+                current_line
+            ),
+            container(editor)
+                .width(Fill)
+                .height(Fill)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(ui_theme::current().panel_bg)),
+                    ..container::Style::default()
+                }),
+            editor_scrollbar(scroll_y, max_scroll, vp.height),
+        ]
+        .height(Fill)
+        .width(Fill)
+        .into()
+    });
 
     let editor_layer = container(editor_body)
         .padding(1)
