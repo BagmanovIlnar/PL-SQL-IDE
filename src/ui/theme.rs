@@ -170,7 +170,10 @@ pub fn chrome_button(status: button::Status) -> button::Style {
     };
     // Disabled buttons are dimmed so availability is visible at a glance.
     let text_color = if status == button::Status::Disabled {
-        Color { a: 0.35, ..current().text }
+        Color {
+            a: 0.35,
+            ..current().text
+        }
     } else {
         current().text
     };

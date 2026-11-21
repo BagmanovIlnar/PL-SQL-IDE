@@ -436,11 +436,13 @@ pub fn oracle_wizard_modal(wizard: &OracleClientWizard) -> Element<'_, OracleWiz
     opaque(
         stack![
             backdrop,
-            opaque(container(card)
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)),
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
         ]
         .width(Fill)
         .height(Fill),

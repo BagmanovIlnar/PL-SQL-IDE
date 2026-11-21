@@ -1345,8 +1345,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             run_spike(app, FetchMode::Execute)
         }
         Message::MenuStop => {
-            let owns_debug = app.debug_session.active
-                && app.debug_session.tab == Some(app.active_tab);
+            let owns_debug =
+                app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
             if owns_debug {
                 return app.apply_debug_command(DebugCommand::Stop);
             }
@@ -1552,7 +1552,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 Err(error) => {
                     app.connection_status.insert(id, ConnectionStatus::Failed);
                     app.connect_error_content = Content::with_text(&error);
-        app.connect_error = Some(error);
+                    app.connect_error = Some(error);
                     app.metrics = i18n::t("status.connect_failed");
                     if app.objects_connection == Some(id) {
                         app.clear_object_browser();
@@ -1742,13 +1742,14 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                         if bind_back {
                             for row in &payload.rows {
                                 if let [name, val] = row.as_slice() {
-                                    if let Some(p) = sheet
-                                        .parameters
-                                        .rows
-                                        .iter_mut()
-                                        .find(|p| p.name.to_ascii_uppercase() == name.to_ascii_uppercase())
-                                    {
-                                        p.value = if val == "NULL" { String::new() } else { val.clone() };
+                                    if let Some(p) = sheet.parameters.rows.iter_mut().find(|p| {
+                                        p.name.to_ascii_uppercase() == name.to_ascii_uppercase()
+                                    }) {
+                                        p.value = if val == "NULL" {
+                                            String::new()
+                                        } else {
+                                            val.clone()
+                                        };
                                     }
                                 }
                             }
@@ -1854,8 +1855,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.apply_debug_command(DebugCommand::Start(system))
             }
             DebugToolbarMessage::Run => {
-                let owns_debug = app.debug_session.active
-                    && app.debug_session.tab == Some(app.active_tab);
+                let owns_debug =
+                    app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
                 if owns_debug {
                     app.apply_debug_command(DebugCommand::Run)
                 } else {
@@ -1871,8 +1872,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 app.apply_debug_command(DebugCommand::RunToNextException)
             }
             DebugToolbarMessage::Stop => {
-                let owns_debug = app.debug_session.active
-                    && app.debug_session.tab == Some(app.active_tab);
+                let owns_debug =
+                    app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
                 if owns_debug {
                     app.apply_debug_command(DebugCommand::Stop)
                 } else if app.busy {
@@ -1935,11 +1936,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                             if let Some(rest) = entry.strip_prefix("BINDOUT ") {
                                 if let Some((name, val)) = rest.split_once('=') {
                                     if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                                        if let Some(p) = sheet
-                                            .parameters
-                                            .rows
-                                            .iter_mut()
-                                            .find(|p| {
+                                        if let Some(p) =
+                                            sheet.parameters.rows.iter_mut().find(|p| {
                                                 p.name.to_ascii_uppercase()
                                                     == name.to_ascii_uppercase()
                                             })
@@ -3386,11 +3384,13 @@ fn connection_modal(app: &App) -> Element<'_, Message> {
     opaque(
         stack![
             backdrop,
-            opaque(container(card)
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)),
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
         ]
         .width(Fill)
         .height(Fill),
@@ -3447,11 +3447,13 @@ fn group_name_modal(app: &App) -> Element<'_, Message> {
                 .width(Fill)
                 .height(Fill)
                 .style(|_| ui_theme::modal_backdrop()),
-            opaque(container(card)
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)),
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
         ]
         .width(Fill)
         .height(Fill),
@@ -3494,11 +3496,13 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
     opaque(
         stack![
             backdrop,
-            opaque(container(card)
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)),
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
         ]
         .width(Fill)
         .height(Fill),
@@ -3508,7 +3512,6 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
 /// SQL execution error dialog. Closing it moves the caret to the parsed
 /// error position (line/column from ORA-06550 / ORA-06512 / PG "LINE N:").
 fn error_modal(app: &App) -> Element<'_, Message> {
-
     let form = column![
         text(i18n::t("dialog.sql_error.title"))
             .size(18)
@@ -3547,11 +3550,13 @@ fn error_modal(app: &App) -> Element<'_, Message> {
     opaque(
         stack![
             backdrop,
-            opaque(container(card)
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)),
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
         ]
         .width(Fill)
         .height(Fill),
@@ -3976,10 +3981,7 @@ fn worksheet_tabs(app: &App) -> Element<'_, Message> {
         tabs = tabs.push(row![tab, close].spacing(0));
     }
 
-    container(tabs)
-        .width(Fill)
-        .style(|_| chrome_style())
-        .into()
+    container(tabs).width(Fill).style(|_| chrome_style()).into()
 }
 
 /// Full work-area placeholder when no worksheets are open.
@@ -4048,11 +4050,13 @@ fn close_tab_confirm_modal(app: &App) -> Element<'_, Message> {
     opaque(
         stack![
             backdrop,
-            opaque(container(card)
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)),
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
         ]
         .width(Fill)
         .height(Fill),
@@ -4065,8 +4069,7 @@ fn close_tab_confirm_modal(app: &App) -> Element<'_, Message> {
 /// code windows (procedure, package, …) → debug block as before.
 fn worksheet_toolbar(app: &App) -> Element<'static, Message> {
     let kind = app.worksheets.get(app.active_tab).map(|sheet| sheet.kind);
-    let debug_here =
-        app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
+    let debug_here = app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
     let debug = debug_toolbar(app.debug_system, debug_here, app.busy).map(Message::Debug);
     let execute = toolbar_icon_button(
         play().size(14),
@@ -4077,9 +4080,7 @@ fn worksheet_toolbar(app: &App) -> Element<'static, Message> {
     let stop = toolbar_icon_button(
         square().size(14),
         i18n::t("toolbar.stop"),
-        app.busy
-            || (app.debug_session.active
-                && app.debug_session.tab == Some(app.active_tab)),
+        app.busy || (app.debug_session.active && app.debug_session.tab == Some(app.active_tab)),
         Message::MenuStop,
     );
     let bar = match kind {
@@ -4370,8 +4371,7 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
         .on_action(Message::EditorAction);
 
     let breakpoints = &sheet.breakpoints;
-    let debug_here =
-        app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
+    let debug_here = app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
     let current_line = if debug_here {
         app.debug_session.current_line
     } else {
@@ -4459,34 +4459,33 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
     // Current debug line: full-width band under the editor text so the paused
     // line is unmistakable. Approximates wrapped lines as one visual row —
     // `ponytail:` same ceiling as the gutter; auto-scroll when iced allows it.
-    let debug_here =
-        app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
+    let debug_here = app.debug_session.active && app.debug_session.tab == Some(app.active_tab);
     let current_line_layer: Element<'_, Message> =
         match (debug_here, app.debug_session.current_line) {
-        (true, Some(line)) => {
-            let top =
-                (EDITOR_PADDING + (line as f32 - 1.0) * EDITOR_LINE_HEIGHT - sheet.scroll_y)
+            (true, Some(line)) => {
+                let top = (EDITOR_PADDING + (line as f32 - 1.0) * EDITOR_LINE_HEIGHT
+                    - sheet.scroll_y)
                     .max(0.0);
-            container(Space::new().width(Fill).height(EDITOR_LINE_HEIGHT))
-                .padding(Padding {
-                    top,
-                    right: 0.0,
-                    bottom: 0.0,
-                    left: gutter_width(line_count),
-                })
-                .width(Fill)
-                .height(Fill)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(Color {
-                        a: 0.35,
-                        ..ui_theme::warning()
-                    })),
-                    ..container::Style::default()
-                })
-                .into()
-        }
-        _ => Space::new().width(0).height(0).into(),
-    };
+                container(Space::new().width(Fill).height(EDITOR_LINE_HEIGHT))
+                    .padding(Padding {
+                        top,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: gutter_width(line_count),
+                    })
+                    .width(Fill)
+                    .height(Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color {
+                            a: 0.35,
+                            ..ui_theme::warning()
+                        })),
+                        ..container::Style::default()
+                    })
+                    .into()
+            }
+            _ => Space::new().width(0).height(0).into(),
+        };
 
     let editor_stack = stack![current_line_layer, editor_layer, overlay]
         .width(Fill)
@@ -4555,9 +4554,13 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
 fn debug_list_view(lines: Vec<String>, height: f32) -> Element<'static, Message> {
     if lines.is_empty() {
         return container(
-            scrollable(text(i18n::t("debug.list_empty")).size(12).color(ui_theme::current().muted))
-                .height(Fill)
-                .width(Fill),
+            scrollable(
+                text(i18n::t("debug.list_empty"))
+                    .size(12)
+                    .color(ui_theme::current().muted),
+            )
+            .height(Fill)
+            .width(Fill),
         )
         .height(height)
         .width(Fill)
@@ -4572,16 +4575,17 @@ fn debug_list_view(lines: Vec<String>, height: f32) -> Element<'static, Message>
 
 /// Grid of declared variables at the current pause: Name | Value (with an
 /// ellipsis button opening the full-value dialog). Scrollable in both axes.
-fn debug_vars_view(
-    variables: Vec<String>,
-    height: f32,
-) -> Element<'static, Message> {
+fn debug_vars_view(variables: Vec<String>, height: f32) -> Element<'static, Message> {
     use iced::widget::text_input;
     if variables.is_empty() {
         return container(
-            scrollable(text(i18n::t("debug.list_empty")).size(12).color(ui_theme::current().muted))
-                .height(Fill)
-                .width(Fill),
+            scrollable(
+                text(i18n::t("debug.list_empty"))
+                    .size(12)
+                    .color(ui_theme::current().muted),
+            )
+            .height(Fill)
+            .width(Fill),
         )
         .height(height)
         .width(Fill)
@@ -4611,10 +4615,7 @@ fn debug_vars_view(
                 button(text("...").size(11).font(Font::MONOSPACE))
                     .padding(Padding::from([2, 8]))
                     .style(|_, status| ui_theme::chrome_button(status))
-                    .on_press(Message::VarDetails(
-                        name.to_string(),
-                        value.to_string(),
-                    )),
+                    .on_press(Message::VarDetails(name.to_string(), value.to_string(),)),
             ]
             .spacing(4)
             .padding(Padding::from([0, 10])),
@@ -4665,11 +4666,13 @@ fn var_details_modal(app: &App) -> Element<'_, Message> {
     opaque(
         stack![
             backdrop,
-            opaque(container(card)
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)),
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
         ]
         .width(Fill)
         .height(Fill),
@@ -4688,11 +4691,7 @@ fn panel_tab_strip(show_result: bool, active: BottomTab) -> Element<'static, Mes
         active,
     ));
     if !show_result {
-        strip = strip.push(panel_tab(
-            i18n::t("panel.stack"),
-            BottomTab::Stack,
-            active,
-        ));
+        strip = strip.push(panel_tab(i18n::t("panel.stack"), BottomTab::Stack, active));
         strip = strip.push(panel_tab(
             i18n::t("panel.variables"),
             BottomTab::Variables,

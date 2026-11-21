@@ -6,7 +6,7 @@
 use iced::alignment::Vertical;
 use iced::border::Border;
 use iced::widget::{
-    button, column, container, pick_list, row, scrollable, text, text_input, Space,
+    button, column, container, pick_list, row, scrollable, text, text_input, tooltip, Space,
 };
 use iced::{Background, Element, Fill, Length, Padding};
 
@@ -18,6 +18,7 @@ use crate::ui::oracle_wizard::{
     WizardOutcome,
 };
 use crate::ui::theme as ui_theme;
+use iced_fonts::lucide::circle_help;
 
 impl OracleSessionMode {
     /// All modes in combo order.
@@ -358,9 +359,15 @@ const BTN_PAD: [u16; 2] = [3, 8];
 /// Right-hand Oracle → Connection settings form.
 pub fn oracle_connection_page(form: &OracleConnectionForm) -> Element<'_, OracleConnectionMessage> {
     let session = column![
-        text(i18n::t("prefs.oracle.session_mode"))
-            .size(LABEL_SIZE)
-            .color(ui_theme::current().muted),
+        row![
+            text(i18n::t("prefs.oracle.session_mode"))
+                .size(LABEL_SIZE)
+                .color(ui_theme::current().muted),
+            Space::new().width(6),
+            help_icon(i18n::t("prefs.oracle.session_mode_tip")),
+        ]
+        .spacing(4)
+        .align_y(Vertical::Center),
         pick_list(
             OracleSessionMode::all(),
             Some(form.prefs.session_mode),
@@ -373,9 +380,15 @@ pub fn oracle_connection_page(form: &OracleConnectionForm) -> Element<'_, Oracle
     .spacing(2);
 
     let home = column![
-        text(i18n::t("prefs.oracle.home"))
-            .size(LABEL_SIZE)
-            .color(ui_theme::current().muted),
+        row![
+            text(i18n::t("prefs.oracle.home"))
+                .size(LABEL_SIZE)
+                .color(ui_theme::current().muted),
+            Space::new().width(6),
+            help_icon(i18n::t("prefs.oracle.home_tip")),
+        ]
+        .spacing(4)
+        .align_y(Vertical::Center),
         row![
             pick_list(
                 form.home_options.clone(),
@@ -396,9 +409,15 @@ pub fn oracle_connection_page(form: &OracleConnectionForm) -> Element<'_, Oracle
     .spacing(2);
 
     let oci = column![
-        text(i18n::t("prefs.oracle.oci_library"))
-            .size(LABEL_SIZE)
-            .color(ui_theme::current().muted),
+        row![
+            text(i18n::t("prefs.oracle.oci_library"))
+                .size(LABEL_SIZE)
+                .color(ui_theme::current().muted),
+            Space::new().width(6),
+            help_icon(i18n::t("prefs.oracle.oci_library_tip")),
+        ]
+        .spacing(4)
+        .align_y(Vertical::Center),
         row![
             pick_list(
                 form.oci_options.clone(),
@@ -503,6 +522,18 @@ pub fn oracle_connection_page(form: &OracleConnectionForm) -> Element<'_, Oracle
     }
 
     scrollable(body).height(Fill).into()
+}
+
+fn help_icon(tip: String) -> Element<'static, OracleConnectionMessage> {
+    tooltip(
+        container(circle_help().size(14).color(ui_theme::current().muted))
+            .padding(Padding::from([2, 2])),
+        text(tip).size(LABEL_SIZE),
+        tooltip::Position::FollowCursor,
+    )
+    .style(|_| ui_theme::tooltip_style())
+    .gap(6)
+    .into()
 }
 
 fn env_editor(draft: &EnvVarDraft) -> Element<'_, OracleConnectionMessage> {

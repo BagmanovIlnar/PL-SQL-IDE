@@ -231,7 +231,10 @@ fn split_bg(status: iced::widget::button::Status) -> Option<Background> {
 
 fn split_left_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
     let text_color = if status == iced::widget::button::Status::Disabled {
-        iced::Color { a: 0.35, ..ui_theme::current().text }
+        iced::Color {
+            a: 0.35,
+            ..ui_theme::current().text
+        }
     } else {
         ui_theme::current().text
     };
@@ -254,7 +257,10 @@ fn split_left_style(status: iced::widget::button::Status) -> iced::widget::butto
 
 fn split_right_style(status: iced::widget::button::Status) -> iced::widget::button::Style {
     let text_color = if status == iced::widget::button::Status::Disabled {
-        iced::Color { a: 0.35, ..ui_theme::current().text }
+        iced::Color {
+            a: 0.35,
+            ..ui_theme::current().text
+        }
     } else {
         ui_theme::current().text
     };

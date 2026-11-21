@@ -89,9 +89,23 @@ fn fmt_expr(target: &str, kind: &str) -> String {
 
 fn declared_vars(stripped: &[String], types: &mut HashMap<String, LocalType>) -> Vec<Var> {
     const TYPES: &[&str] = &[
-        "NUMBER", "VARCHAR2", "VARCHAR", "CHAR", "NCHAR", "NVARCHAR2", "DATE", "BOOLEAN",
-        "PLS_INTEGER", "BINARY_INTEGER", "BINARY_DOUBLE", "INTEGER", "INT", "SMALLINT",
-        "FLOAT", "REAL", "TIMESTAMP",
+        "NUMBER",
+        "VARCHAR2",
+        "VARCHAR",
+        "CHAR",
+        "NCHAR",
+        "NVARCHAR2",
+        "DATE",
+        "BOOLEAN",
+        "PLS_INTEGER",
+        "BINARY_INTEGER",
+        "BINARY_DOUBLE",
+        "INTEGER",
+        "INT",
+        "SMALLINT",
+        "FLOAT",
+        "REAL",
+        "TIMESTAMP",
     ];
     let section: String = stripped.join(" ");
     let mut vars = Vec::new();
@@ -109,7 +123,12 @@ fn declared_vars(stripped: &[String], types: &mut HashMap<String, LocalType>) ->
             continue;
         }
         if skip > 0 {
-            if first == "END" && !matches!(tokens.get(1).map(String::as_str), Some("IF") | Some("LOOP") | Some("CASE")) {
+            if first == "END"
+                && !matches!(
+                    tokens.get(1).map(String::as_str),
+                    Some("IF") | Some("LOOP") | Some("CASE")
+                )
+            {
                 skip = 0;
             }
             continue;
@@ -405,7 +424,9 @@ pub fn instrument(source: &str, pipe: &str) -> String {
         }
         if in_declare {
             decl_buf.extend(declared_vars(
-                stripped[idx..=idx.min(stripped.len() - 1)].to_vec().as_slice(),
+                stripped[idx..=idx.min(stripped.len() - 1)]
+                    .to_vec()
+                    .as_slice(),
                 &mut local_types,
             ));
         }
@@ -471,9 +492,7 @@ pub fn instrument(source: &str, pipe: &str) -> String {
             } else {
                 format!(" {packs} plsqlide__pause({stmt});")
             };
-            line.push_str(&format!(
-                " IF plsqlide__dbg({stmt}) = 1 THEN{body} END IF;"
-            ));
+            line.push_str(&format!(" IF plsqlide__dbg({stmt}) = 1 THEN{body} END IF;"));
         }
         if Some(idx) == stub_line && first_begin.is_some() {
             line.push(' ');

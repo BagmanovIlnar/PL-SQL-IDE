@@ -1155,9 +1155,7 @@ fn instrumented_command(request: DebugEngineRequest) -> CoreResult<DebugEngineEv
                     status: "Debugger started (local instrumentation)".into(),
                     current_line: None,
                     message: "Local debugger ready — Run / Step operate on the block itself".into(),
-                    log: vec![
-                        "local instrumented debugging: no server debugger involved".into()
-                    ],
+                    log: vec!["local instrumented debugging: no server debugger involved".into()],
                     variables: Vec::new(),
                 });
             }
@@ -1297,153 +1295,145 @@ fn instrumented_launch(
     use std::sync::atomic::Ordering;
 
     let mode = if resume_first {
-                "STEP".to_string()
-            } else if matches!(
-                request.command,
-                DebugCommand::StepInto | DebugCommand::StepOver | DebugCommand::StepOut
-            ) {
-                "STEP".to_string()
-            } else if matches!(request.command, DebugCommand::Run)
-                && !request.breakpoints.is_empty()
-            {
-                format!(
-                    "RUN:{}",
-                    request
-                        .breakpoints
-                        .iter()
-                        .map(|bp| bp.line.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                )
-            } else if matches!(request.command, DebugCommand::RunToCursor) {
-                format!("RUN:{}", request.cursor_line.unwrap_or(1))
-            } else {
-                "RUN:".to_string()
-            };
+        "STEP".to_string()
+    } else if matches!(
+        request.command,
+        DebugCommand::StepInto | DebugCommand::StepOver | DebugCommand::StepOut
+    ) {
+        "STEP".to_string()
+    } else if matches!(request.command, DebugCommand::Run) && !request.breakpoints.is_empty() {
+        format!(
+            "RUN:{}",
+            request
+                .breakpoints
+                .iter()
+                .map(|bp| bp.line.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    } else if matches!(request.command, DebugCommand::RunToCursor) {
+        format!("RUN:{}", request.cursor_line.unwrap_or(1))
+    } else {
+        "RUN:".to_string()
+    };
 
-            let mut log = vec![format!("resume mode {mode}")];
-            send_cmd(id, &pipe, &mode)?;
+    let mut log = vec![format!("resume mode {mode}")];
+    send_cmd(id, &pipe, &mode)?;
 
-            let source = if resume_first {
-                SESSION_SOURCE
-                    .lock()
-                    .map_err(|_| CoreError::Other("session source lock".into()))?
-                    .remove(&id)
-            } else {
-                None
-            };
+    let source = if resume_first {
+        SESSION_SOURCE
+            .lock()
+            .map_err(|_| CoreError::Other("session source lock".into()))?
+            .remove(&id)
+    } else {
+        None
+    };
 
-            let finished = if resume_first {
-                let state = new_run_state();
-                FINISHED
-                    .lock()
-                    .map_err(|_| CoreError::Other("finished lock".into()))?
-                    .insert(id, state.clone());
-                state
-            } else {
-                FINISHED
-                    .lock()
-                    .ok()
-                    .and_then(|f| f.get(&id).cloned())
-                    .unwrap_or_else(|| {
-                        std::sync::Arc::new(RunState {
-                            finished: std::sync::atomic::AtomicBool::new(true),
-                            error: std::sync::Mutex::new(None),
-                        })
-                    })
-            };
+    let finished = if resume_first {
+        let state = new_run_state();
+        FINISHED
+            .lock()
+            .map_err(|_| CoreError::Other("finished lock".into()))?
+            .insert(id, state.clone());
+        state
+    } else {
+        FINISHED
+            .lock()
+            .ok()
+            .and_then(|f| f.get(&id).cloned())
+            .unwrap_or_else(|| {
+                std::sync::Arc::new(RunState {
+                    finished: std::sync::atomic::AtomicBool::new(true),
+                    error: std::sync::Mutex::new(None),
+                })
+            })
+    };
 
-            if let Some(source) = source {
-                let instrumented = super::dbg_instrument::instrument(&source, &pipe);
-                tracing::info!(
-                    "debug: block staged, {} chars, pipe {pipe}",
-                    instrumented.len()
-                );
-                let (target, gen) = detach_target_with_retry(id)?;
-                let id2 = id;
-                let state = finished.clone();
-                std::thread::spawn(move || {
-                    let mut target = target;
-                    let has_outs = instrumented.starts_with("DECLARE\nPLSQLIDE_P");
-                    let mut bind_outs: Vec<(String, String)> = Vec::new();
-                    let outcome = if has_outs {
-                        // Wrapper opens :PLSQLIDE_OUT — bind the cursor and
-                        // read the parameter values back after the block ends.
-                        match target
-                            .execute(
-                                &instrumented,
-                                &[&None::<oracle::sql_type::RefCursor>],
-                            )
+    if let Some(source) = source {
+        let instrumented = super::dbg_instrument::instrument(&source, &pipe);
+        tracing::info!(
+            "debug: block staged, {} chars, pipe {pipe}",
+            instrumented.len()
+        );
+        let (target, gen) = detach_target_with_retry(id)?;
+        let id2 = id;
+        let state = finished.clone();
+        std::thread::spawn(move || {
+            let mut target = target;
+            let has_outs = instrumented.starts_with("DECLARE\nPLSQLIDE_P");
+            let mut bind_outs: Vec<(String, String)> = Vec::new();
+            let outcome = if has_outs {
+                // Wrapper opens :PLSQLIDE_OUT — bind the cursor and
+                // read the parameter values back after the block ends.
+                match target.execute(&instrumented, &[&None::<oracle::sql_type::RefCursor>]) {
+                    Ok(mut stmt) => {
+                        if let Ok(mut refcur) =
+                            stmt.bind_value::<usize, oracle::sql_type::RefCursor>(1)
                         {
-                            Ok(mut stmt) => {
-                                if let Ok(mut refcur) =
-                                    stmt.bind_value::<usize, oracle::sql_type::RefCursor>(1)
-                                {
-                                    if let Ok(rows) = refcur.query() {
-                                        for row in rows.flatten() {
-                                            let name = row
-                                                .get::<usize, Option<String>>(0)
-                                                .ok()
-                                                .flatten()
-                                                .unwrap_or_default();
-                                            let val = row
-                                                .get::<usize, Option<String>>(1)
-                                                .ok()
-                                                .flatten()
-                                                .unwrap_or_else(|| "NULL".into());
-                                            bind_outs.push((name, val));
-                                        }
-                                    }
+                            if let Ok(rows) = refcur.query() {
+                                for row in rows.flatten() {
+                                    let name = row
+                                        .get::<usize, Option<String>>(0)
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or_default();
+                                    let val = row
+                                        .get::<usize, Option<String>>(1)
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or_else(|| "NULL".into());
+                                    bind_outs.push((name, val));
                                 }
-                                Ok(())
                             }
-                            Err(err) => Err(format!("block: {err}")),
                         }
-                    } else {
-                        target
-                            .execute(&instrumented, &[])
-                            .map(|_| ())
-                            .map_err(|err| format!("block: {err}"))
-                    };
-                    tracing::info!("debug: target execute returned {outcome:?}");
-                    if let Err(text) = &outcome {
-                        if let Ok(mut guard) = state.error.lock() {
-                            *guard = Some(text.clone());
-                        }
+                        Ok(())
                     }
-                    if !bind_outs.is_empty() {
-                        if let Ok(mut guard) = BINDOUTS.lock() {
-                            guard.insert(id2, bind_outs);
-                        }
-                    }
-                    state.finished.store(true, Ordering::SeqCst);
-                    crate::core::oracle_pool::debug_access::reattach_target(id2, target, gen);
-                });
-                log.push("block running under instrumentation".into());
-            }
-
-            let (status, line, msgs, vars) =
-                wait_pause(id, &pipe, &finished, resume_first)?;
-            log.extend(msgs);
-            if status == "program finished" {
-                if let Ok(mut guard) = BINDOUTS.lock() {
-                    if let Some(outs) = guard.remove(&id) {
-                        for (name, val) in outs {
-                            log.push(format!("BINDOUT {name}={val}"));
-                        }
-                    }
+                    Err(err) => Err(format!("block: {err}")),
+                }
+            } else {
+                target
+                    .execute(&instrumented, &[])
+                    .map(|_| ())
+                    .map_err(|err| format!("block: {err}"))
+            };
+            tracing::info!("debug: target execute returned {outcome:?}");
+            if let Err(text) = &outcome {
+                if let Ok(mut guard) = state.error.lock() {
+                    *guard = Some(text.clone());
                 }
             }
-            Ok(DebugEngineEvent {
-                active: true,
-                system: DebugSystem::DbmsDebug,
-                status: status.clone(),
-                current_line: line,
-                message: status,
-                log,
-                variables: vars,
-            })
+            if !bind_outs.is_empty() {
+                if let Ok(mut guard) = BINDOUTS.lock() {
+                    guard.insert(id2, bind_outs);
+                }
+            }
+            state.finished.store(true, Ordering::SeqCst);
+            crate::core::oracle_pool::debug_access::reattach_target(id2, target, gen);
+        });
+        log.push("block running under instrumentation".into());
+    }
+
+    let (status, line, msgs, vars) = wait_pause(id, &pipe, &finished, resume_first)?;
+    log.extend(msgs);
+    if status == "program finished" {
+        if let Ok(mut guard) = BINDOUTS.lock() {
+            if let Some(outs) = guard.remove(&id) {
+                for (name, val) in outs {
+                    log.push(format!("BINDOUT {name}={val}"));
+                }
+            }
         }
+    }
+    Ok(DebugEngineEvent {
+        active: true,
+        system: DebugSystem::DbmsDebug,
+        status: status.clone(),
+        current_line: line,
+        message: status,
+        log,
+        variables: vars,
+    })
+}
 
 #[cfg(feature = "oracle")]
 fn current_pipe(id: ConnectionId) -> CoreResult<String> {
@@ -1530,8 +1520,7 @@ fn wait_pause(
                 .map_err(|err| CoreError::Query(format!("pipe recv bind: {err}")))?;
             use std::io::Read;
             let mut out = String::new();
-            clob
-                .read_to_string(&mut out)
+            clob.read_to_string(&mut out)
                 .map_err(|err| CoreError::Query(format!("pipe recv read: {err}")))?;
             Ok::<String, CoreError>(out)
         });
@@ -1563,7 +1552,6 @@ fn wait_pause(
     log.push("no pause event within the wait budget".into());
     Ok(("waiting… (no pause yet)".into(), None, log, Vec::new()))
 }
-
 
 /// Per-connection run state: finished flag + block execution error.
 #[cfg(feature = "oracle")]

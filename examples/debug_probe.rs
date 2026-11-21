@@ -44,9 +44,14 @@ BEGIN
 END;";
     let mut params = plsqlide::ui::parameters::parse_binds(source)
         .into_iter()
-        .map(|n| plsqlide::ui::parameters::Parameter::new(
-            n, plsqlide::ui::parameters::ParamDataType::Oracle(
-                plsqlide::ui::parameters::OracleType::Varchar2)))
+        .map(|n| {
+            plsqlide::ui::parameters::Parameter::new(
+                n,
+                plsqlide::ui::parameters::ParamDataType::Oracle(
+                    plsqlide::ui::parameters::OracleType::Varchar2,
+                ),
+            )
+        })
         .collect::<Vec<_>>();
     params[0].value = "внутри".to_string();
     let (source, offset) = plsqlide::ui::parameters::bind_wrap(source, &params, true);

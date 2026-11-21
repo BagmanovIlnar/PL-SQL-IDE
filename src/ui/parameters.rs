@@ -875,11 +875,13 @@ pub fn value_editor_modal(draft: &ValueEditorDraft) -> Element<'_, ParamMessage>
     opaque(
         stack![
             backdrop,
-            opaque(container(card)
-                .width(Fill)
-                .height(Fill)
-                .center_x(Fill)
-                .center_y(Fill)),
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
         ]
         .width(Fill)
         .height(Fill),
@@ -1097,9 +1099,7 @@ pub fn bind_wrap(source: &str, params: &[Parameter], capture: bool) -> (String, 
             .iter()
             .map(|p| {
                 let name = p.name.to_ascii_uppercase();
-                format!(
-                    "SELECT '{name}' AS NAME, TO_CHAR(PLSQLIDE_P_{name}) AS VAL FROM DUAL"
-                )
+                format!("SELECT '{name}' AS NAME, TO_CHAR(PLSQLIDE_P_{name}) AS VAL FROM DUAL")
             })
             .collect();
         wrapped.push_str("\nOPEN :PLSQLIDE_OUT FOR\n");
@@ -1122,14 +1122,20 @@ mod tests {
 
     #[test]
     fn wrap_declares_substitutes_and_offsets() {
-        let params = vec![Parameter::new("Test", ParamDataType::Oracle(OracleType::Varchar2))];
+        let params = vec![Parameter::new(
+            "Test",
+            ParamDataType::Oracle(OracleType::Varchar2),
+        )];
         let (sql, offset) = bind_wrap("BEGIN\n :TEST := 'a''b';\nEND;", &params, true);
         assert_eq!(offset, 3);
         assert!(sql.starts_with(
             "DECLARE\nPLSQLIDE_P_TEST VARCHAR2(4000) := NULL;\nBEGIN\nBEGIN\n PLSQLIDE_P_TEST := 'a''b';\nEND;\n"
         ));
         assert!(sql.contains("OPEN :PLSQLIDE_OUT FOR\nSELECT 'TEST' AS NAME, TO_CHAR(PLSQLIDE_P_TEST) AS VAL FROM DUAL;"));
-        assert_eq!(bind_wrap("BEGIN NULL; END;", &[], true).0, "BEGIN NULL; END;");
+        assert_eq!(
+            bind_wrap("BEGIN NULL; END;", &[], true).0,
+            "BEGIN NULL; END;"
+        );
     }
 
     #[test]

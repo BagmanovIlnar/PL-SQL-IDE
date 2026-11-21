@@ -49,9 +49,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let src = "DECLARE\n      v_x NUMBER;\nBEGIN\n      :dcdcd := 'dcdcd';\nEND;";
     let mut params = plsqlide::ui::parameters::parse_binds(src)
         .into_iter()
-        .map(|n| plsqlide::ui::parameters::Parameter::new(
-            n, plsqlide::ui::parameters::ParamDataType::Oracle(
-                plsqlide::ui::parameters::OracleType::Varchar2)))
+        .map(|n| {
+            plsqlide::ui::parameters::Parameter::new(
+                n,
+                plsqlide::ui::parameters::ParamDataType::Oracle(
+                    plsqlide::ui::parameters::OracleType::Varchar2,
+                ),
+            )
+        })
         .collect::<Vec<_>>();
     params[0].value = "vfvf".to_string();
     let (wrapped, _off) = plsqlide::ui::parameters::bind_wrap(src, &params, true);
@@ -65,9 +70,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeout_ms: Some(10_000),
         cancel: false,
         max_rows: None,
-    }).await?;
-    println!("ok={} rows={} msg={:?}", result.connected, result.rows.len(), result.message);
-    for row in &result.rows { println!("out: {row:?}"); }
+    })
+    .await?;
+    println!(
+        "ok={} rows={} msg={:?}",
+        result.connected,
+        result.rows.len(),
+        result.message
+    );
+    for row in &result.rows {
+        println!("out: {row:?}");
+    }
 
     for (label, sql, max_rows) in probes {
         println!("\n=== {label} ===");

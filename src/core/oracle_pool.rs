@@ -4,8 +4,8 @@
 //! opening a one-shot spike connection every time.
 
 use std::collections::HashMap;
-use std::time::Duration;
 use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
 use super::connection_profile::ConnectionProfile;
 use super::{ConnectionId, CoreError, CoreResult};
