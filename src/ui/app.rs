@@ -1911,7 +1911,12 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.debug_session.active = event.active && !over;
                     app.debug_session.system = event.system;
                     app.debug_session.status = event.status.clone();
-                    app.debug_session.variables = event.variables.clone();
+                    // The finished event carries no final variable snapshot
+                    // (the block ran past the last stub) — keep the values
+                    // shown at the last pause instead of blanking the tab.
+                    if !event.variables.is_empty() {
+                        app.debug_session.variables = event.variables.clone();
+                    }
                     // Map wrapper-injected lines back to the editor text.
                     app.debug_session.current_line = event
                         .current_line

@@ -117,10 +117,11 @@ pub mod debug_access {
         f: impl FnOnce(&mut Connection) -> CoreResult<R>,
     ) -> CoreResult<R> {
         let mut entry = take(id)?;
-        let mut target = entry
-            .target
-            .take()
-            .ok_or_else(|| CoreError::Other("debug target session is busy".into()))?;
+        if entry.target.is_none() {
+            put(id, entry);
+            return Err(CoreError::Other("debug target session is busy".into()));
+        }
+        let mut target = entry.target.take().unwrap();
         let result = f(&mut target);
         entry.target = Some(target);
         put(id, entry);
@@ -131,12 +132,15 @@ pub mod debug_access {
     /// the controller keeps polling. Reattach with [`reattach_target`].
     pub fn detach_target(id: ConnectionId) -> CoreResult<(Connection, u64)> {
         let mut entry = take(id)?;
-        let target = entry
-            .target
-            .take()
-            .ok_or_else(|| CoreError::Other("debug target session is busy".into()))?;
+        if entry.target.is_none() {
+            // put the entry BACK — dropping it turned any later call into
+            // “oracle session missing — Connect first” for the whole window.
+            put(id, entry);
+            return Err(CoreError::Other("debug target session is busy".into()));
+        }
         entry.generation += 1;
         let generation = entry.generation;
+        let target = entry.target.take().unwrap();
         put(id, entry);
         Ok((target, generation))
     }
@@ -179,14 +183,16 @@ pub mod debug_access {
         R2: Send + 'static,
     {
         let mut entry = take(id)?;
-        let mut target = entry
-            .target
-            .take()
-            .ok_or_else(|| CoreError::Other("debug target session is busy".into()))?;
-        let mut ctrl = entry
-            .debug_ctrl
-            .take()
-            .ok_or_else(|| CoreError::Other("debug controller session missing".into()))?;
+        if entry.target.is_none() {
+            put(id, entry);
+            return Err(CoreError::Other("debug target session is busy".into()));
+        }
+        if entry.debug_ctrl.is_none() {
+            put(id, entry);
+            return Err(CoreError::Other("debug controller session missing".into()));
+        }
+        let mut target = entry.target.take().unwrap();
+        let mut ctrl = entry.debug_ctrl.take().unwrap();
 
         let t = std::thread::spawn(move || {
             let r = target_work(&mut target);
