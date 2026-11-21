@@ -1266,7 +1266,7 @@ static FINISHED: LazyLock<Mutex<HashMap<ConnectionId, std::sync::Arc<RunState>>>
 /// thread finishes dying (Stop + start_prep's STOP should kill it quickly).
 fn detach_target_with_retry(id: ConnectionId) -> CoreResult<(oracle::Connection, u64)> {
     for _ in 0..25 {
-        match debug_access::detach_target(id) {
+        match super::oracle_pool::debug_access::detach_target(id) {
             Ok(pair) => return Ok(pair),
             Err(CoreError::Other(text)) if text.contains("busy") => {
                 std::thread::sleep(Duration::from_millis(200));
