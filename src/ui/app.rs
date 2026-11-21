@@ -1790,7 +1790,24 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             DebugToolbarMessage::RunToNextException => {
                 app.apply_debug_command(DebugCommand::RunToNextException)
             }
-            DebugToolbarMessage::Stop => app.apply_debug_command(DebugCommand::Stop),
+            DebugToolbarMessage::Stop => {
+                let owns_debug = app.debug_session.active
+                    && app.debug_session.tab == Some(app.active_tab);
+                if owns_debug {
+                    app.apply_debug_command(DebugCommand::Stop)
+                } else if app.busy {
+                    // Plain run in flight — cancel it (same as toolbar Stop).
+                    // ponytail: cancels the UI wait only; server-side kill
+                    // needs a cancellation token threaded through the spike.
+                    app.busy = false;
+                    app.spike_run += 1;
+                    app.last_output = i18n::t("status.cancelled");
+                    app.metrics = i18n::t("status.cancelled");
+                    Task::none()
+                } else {
+                    Task::none()
+                }
+            }
             DebugToolbarMessage::ExecuteSqlInDebugSession => {
                 app.apply_debug_command(DebugCommand::ExecuteSqlInDebugSession)
             }

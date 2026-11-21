@@ -98,11 +98,13 @@ pub fn debug_toolbar(
             DebugToolbarMessage::ExecuteSqlInDebugSession,
             active && !busy,
         ),
+        // Stop is live while anything is executing: the debug session or a
+        // plain run (busy).
         tool_icon(
             square().size(ICON_SIZE),
             i18n::t("toolbar.stop"),
             DebugToolbarMessage::Stop,
-            active && !busy,
+            busy || (active && !busy),
         ),
         Space::new().width(Fill),
     ]
