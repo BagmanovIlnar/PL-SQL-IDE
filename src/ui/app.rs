@@ -392,11 +392,8 @@ struct App {
     connect_error: Option<String>,
     /// SQL execution error shown in a modal (with caret jump on close).
     error_modal: Option<String>,
-    /// Selectable/copyable view of `error_modal` for the text_editor widget.
-    error_content: Content,
-    connect_error_content: Content,
     /// Open details dialog for a debug variable: (name, selectable value).
-    var_details: Option<(String, Content)>,
+    var_details: Option<(String, String)>,
     dialog: Option<ConnectionDraft>,
     dialog_error: Option<String>,
     /// Sidebar group names in display order (persisted in connections.json).
@@ -481,8 +478,8 @@ enum Message {
     EditorThumbDrag(f32),
     /// Left button released anywhere (drag ends).
     EditorThumbRelease,
-    /// Any action on a modal's read-only error text: undo the edit, keep selection.
-    ModalErrorAction(Action),
+    /// Copy a modal's error text to the clipboard.
+    CopyError(String),
     FilterChanged(String),
     /// Toggle “Only current user” in the Objects panel.
     ToggleCurrentUserOnly(bool),
@@ -504,7 +501,6 @@ enum Message {
     /// Show a debug variable's full value in a details dialog.
     VarDetails(String, String),
     /// Selection/scroll inside the variable-details dialog.
-    VarDetailsAction(Action),
     CloseVarDetails,
     SelectTab(usize),
     CloseTab(usize),
@@ -660,8 +656,6 @@ impl App {
             parameters_height: PANEL_HEIGHT,
             resize_drag: None,
             debug_session: DebugSession::default(),
-            error_content: Content::new(),
-            connect_error_content: Content::new(),
             var_details: None,
             debug_system: oracle_debugger_prefs::load().default_debug_system,
             close_confirm: None,
@@ -1169,27 +1163,9 @@ impl App {
 
 fn update(app: &mut App, message: Message) -> Task<Message> {
     match message {
-        Message::ModalErrorAction(action) => {
-            // Read-only: apply selection/scroll, ignore text edits.
-            if !matches!(action, Action::Edit(_)) {
-                app.error_content.perform(action.clone());
-                app.connect_error_content.perform(action.clone());
-                if let Some((_, content)) = &mut app.var_details {
-                    content.perform(action);
-                }
-            }
-            Task::none()
-        }
+        Message::CopyError(value) => iced::clipboard::write(value),
         Message::VarDetails(name, value) => {
-            app.var_details = Some((name, Content::with_text(&value)));
-            Task::none()
-        }
-        Message::VarDetailsAction(action) => {
-            if !matches!(action, Action::Edit(_)) {
-                if let Some((_, content)) = &mut app.var_details {
-                    content.perform(action);
-                }
-            }
+            app.var_details = Some((name, value));
             Task::none()
         }
         Message::CloseVarDetails => {
@@ -1791,7 +1767,6 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
                 Err(error) => {
                     app.connection_status.insert(id, ConnectionStatus::Failed);
-                    app.connect_error_content = Content::with_text(&error);
                     app.connect_error = Some(error);
                     app.metrics = i18n::t("status.connect_failed");
                     if app.objects_connection == Some(id) {
@@ -2351,7 +2326,6 @@ fn run_connect(app: &mut App) -> Task<Message> {
                 app.busy = false;
                 app.connecting = None;
                 app.connection_status.insert(id, ConnectionStatus::Failed);
-                app.connect_error_content = Content::with_text(&i18n::t("status.oracle_disabled"));
                 app.connect_error = Some(i18n::t("status.oracle_disabled"));
                 app.metrics = i18n::t("status.connect_failed");
                 Task::none()
@@ -2499,7 +2473,6 @@ fn auto_fill_bind_params(app: &mut App, text: &str) -> Vec<crate::ui::parameters
 
 /// Shows the SQL error modal and keeps a selectable editor copy of the text.
 fn show_error_modal(app: &mut App, text: String) {
-    app.error_content = Content::with_text(&text);
     app.error_modal = Some(text);
 }
 
@@ -3901,14 +3874,15 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
         text(i18n::t("dialog.connect_failed.title"))
             .size(18)
             .color(ui_theme::error()),
-        text_editor(&app.connect_error_content)
-            .height(200)
-            .width(520)
-            .size(13)
-            .on_action(Message::ModalErrorAction)
-            .style(|_, status| editor_style(status)),
+        console_text_view(app.connect_error.clone().unwrap_or_default(), 200.0, 520.0),
         row![
             Space::new().width(Fill),
+            button(text(i18n::t("dialog.copy")).size(13))
+                .padding(Padding::from([8, 16]))
+                .style(|_, status| ui_theme::chrome_button(status))
+                .on_press(Message::CopyError(
+                    app.connect_error.clone().unwrap_or_default()
+                )),
             button(text(i18n::t("dialog.connect_failed.ok")).size(13))
                 .padding(Padding::from([8, 16]))
                 .style(|_, status| ui_theme::primary_button(status))
@@ -3952,17 +3926,17 @@ fn error_modal(app: &App) -> Element<'_, Message> {
         text(i18n::t("dialog.sql_error.title"))
             .size(18)
             .color(ui_theme::error()),
-        // Selectable/copyable text editor over the stored error (copy is
-        // handled inside the widget).
-        text_editor(&app.error_content)
-            .height(260)
-            .width(520)
-            .size(13)
-            .font(Font::MONOSPACE)
-            .on_action(Message::ModalErrorAction)
-            .style(|_, status| editor_style(status)),
+        // Long ORA- stacks: monospace console text, both-axis scrollbars,
+        // copy via the button below (text_editor had no scrollbar).
+        console_text_view(app.error_modal.clone().unwrap_or_default(), 260.0, 520.0),
         row![
             Space::new().width(Fill),
+            button(text(i18n::t("dialog.copy")).size(13))
+                .padding(Padding::from([8, 16]))
+                .style(|_, status| ui_theme::chrome_button(status))
+                .on_press(Message::CopyError(
+                    app.error_modal.clone().unwrap_or_default()
+                )),
             button(text(i18n::t("dialog.connect_failed.ok")).size(13))
                 .padding(Padding::from([8, 16]))
                 .style(|_, status| ui_theme::primary_button(status))
@@ -5140,6 +5114,54 @@ fn command_banner(app: &App) -> String {
     }
 }
 
+/// Monospace scrollable text used by the modals: no soft-wrapping,
+/// both-axis scrollbars with visible rails.
+fn console_text_view(value: String, height: f32, width: f32) -> Element<'static, Message> {
+    scrollable(
+        text(value)
+            .size(13)
+            .font(Font::MONOSPACE)
+            .wrapping(iced::widget::text::Wrapping::None),
+    )
+    .height(height)
+    .width(width)
+    .direction(both_scroll())
+    .style(|_, _| plain_scroll_style())
+    .into()
+}
+
+/// Both-axis scrolling with always-visible 10px scrollbars.
+fn both_scroll() -> scrollable::Direction {
+    scrollable::Direction::Both {
+        vertical: scrollable::Scrollbar::new(),
+        horizontal: scrollable::Scrollbar::new(),
+    }
+}
+
+/// Visible rail/scroller colors so the ползунок не теряется на фоне.
+fn plain_scroll_style() -> scrollable::Style {
+    let rail = || scrollable::Rail {
+        background: Some(Background::Color(ui_theme::current().chrome_bg)),
+        border: Border::default(),
+        scroller: scrollable::Scroller {
+            background: Background::Color(ui_theme::current().border),
+            border: Border::default(),
+        },
+    };
+    scrollable::Style {
+        container: container::Style::default(),
+        vertical_rail: rail(),
+        horizontal_rail: rail(),
+        gap: None,
+        auto_scroll: scrollable::AutoScroll {
+            background: Background::Color(Color::TRANSPARENT),
+            border: Border::default(),
+            shadow: iced::Shadow::default(),
+            icon: Color::TRANSPARENT,
+        },
+    }
+}
+
 /// Borderless monospace input so the SQL> prompt line merges into the
 /// console text.
 fn console_input_style() -> iced::widget::text_input::Style {
@@ -5233,11 +5255,16 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             .map(|p| oracle_pool::has_target(p.id))
             .unwrap_or(false);
         let history: Element<'a, Message> = if !dialog.is_empty() {
-            text(dialog).size(12).font(Font::MONOSPACE).into()
+            text(dialog)
+                .size(12)
+                .font(Font::MONOSPACE)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .into()
         } else if let Some(p) = profile.filter(|_| connected) {
             text(command_banner_for(p))
                 .size(12)
                 .font(Font::MONOSPACE)
+                .wrapping(iced::widget::text::Wrapping::None)
                 .into()
         } else {
             text(i18n::t("command.not_connected"))
@@ -5268,6 +5295,8 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             .padding(Padding::from([6, 8])),
         )
         .height(Fill)
+        .direction(both_scroll())
+        .style(|_, _| plain_scroll_style())
         .into()
     };
 
@@ -5301,9 +5330,19 @@ fn debug_list_view(lines: Vec<String>, height: f32) -> Element<'static, Message>
     }
     let mut col = column![].spacing(2).padding(Padding::from([6, 10]));
     for line in lines {
-        col = col.push(text(line).size(12).font(Font::MONOSPACE));
+        col = col.push(
+            text(line)
+                .size(12)
+                .font(Font::MONOSPACE)
+                .wrapping(iced::widget::text::Wrapping::None),
+        );
     }
-    scrollable(col).height(height).width(Fill).into()
+    scrollable(col)
+        .height(height)
+        .width(Fill)
+        .direction(both_scroll())
+        .style(|_, _| plain_scroll_style())
+        .into()
 }
 
 /// Grid of declared variables at the current pause: Name | Value (with an
@@ -5354,29 +5393,32 @@ fn debug_vars_view(variables: Vec<String>, height: f32) -> Element<'static, Mess
             .padding(Padding::from([0, 10])),
         );
     }
-    container(scrollable(col).height(Fill).width(Fill))
-        .height(height)
-        .width(Fill)
-        .into()
+    container(
+        scrollable(col)
+            .height(Fill)
+            .width(Fill)
+            .direction(both_scroll())
+            .style(|_, _| plain_scroll_style()),
+    )
+    .height(height)
+    .width(Fill)
+    .into()
 }
 
 /// Full-value dialog for a debug variable (selectable/copyable).
 fn var_details_modal(app: &App) -> Element<'_, Message> {
-    use iced::widget::text_editor;
-    let Some((name, content)) = &app.var_details else {
+    let Some((name, value)) = &app.var_details else {
         return column![].into();
     };
     let form = column![
         text(name.clone()).size(16),
-        text_editor(content)
-            .height(160)
-            .width(520)
-            .size(13)
-            .font(Font::MONOSPACE)
-            .on_action(Message::VarDetailsAction)
-            .style(|_, status| editor_style(status)),
+        console_text_view(value.clone(), 160.0, 520.0),
         row![
             Space::new().width(Fill),
+            button(text(i18n::t("dialog.copy")).size(13))
+                .padding(Padding::from([8, 16]))
+                .style(|_, status| ui_theme::chrome_button(status))
+                .on_press(Message::CopyError(value.clone())),
             button(text(i18n::t("dialog.connect_failed.ok")).size(13))
                 .padding(Padding::from([8, 16]))
                 .style(|_, status| ui_theme::primary_button(status))

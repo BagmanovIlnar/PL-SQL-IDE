@@ -366,6 +366,7 @@
         "command.dialog": "Dialog",
         "command.edit": "Edit",
         "command.dialog_empty": "No commands yet",
-        "command.not_connected": "Not connected"
+        "command.not_connected": "Not connected",
+        "dialog.copy": "Copy"
     }
 }
