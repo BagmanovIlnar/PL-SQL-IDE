@@ -1951,7 +1951,13 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.last_output = payload.output;
                     if let Some(echo) = app.command_echo.take() {
                         if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
-                            let output = console_expand_tabs(&output);
+                            // SQL*Plus-style table when the run returned columns;
+                            // raw output otherwise (DBMS_OUTPUT / messages).
+                            let output = if payload.columns.is_empty() {
+                                output
+                            } else {
+                                sqlplus_table(&payload.columns, &payload.rows)
+                            };
                             let entry = if echo.is_empty() {
                                 format!("{output}\n\n")
                             } else {
@@ -4547,6 +4553,27 @@ mod group_path_tests {
 }
 
 #[cfg(test)]
+mod sqlplus_table_tests {
+    use super::*;
+
+    #[test]
+    fn aligns_columns_and_separator() {
+        let out = sqlplus_table(
+            &["ID".into(), "NAME".into()],
+            &[
+                vec!["1".to_string(), "dual".to_string()],
+                vec!["42".to_string(), "t".to_string()],
+            ],
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "ID  NAME");
+        assert_eq!(lines[1], "--  ----");
+        assert_eq!(lines[2], " 1  dual");
+        assert_eq!(lines[3], "42  t   ");
+    }
+}
+
+#[cfg(test)]
 mod row_offsets_tests {
     use super::*;
 
@@ -5114,6 +5141,64 @@ fn command_banner_for(profile: &ConnectionProfile) -> String {
 /// them to 4 spaces so indentation survives in the console.
 fn console_expand_tabs(value: &str) -> String {
     value.replace('\t', "    ")
+}
+
+/// SQL*Plus-style table: columns padded to content width, `---` under the
+/// headers, numeric columns right-aligned (heuristic: every value parses as
+/// a number).
+// ponytail: numeric detection by value sampling; use typed columns if it misfires.
+fn sqlplus_table(columns: &[String], rows: &[Vec<String>]) -> String {
+    let n = columns.len();
+    let mut widths: Vec<usize> = columns.iter().map(|c| c.chars().count()).collect();
+    for row in rows {
+        for (i, v) in row.iter().enumerate().take(n) {
+            widths[i] = widths[i].max(v.chars().count());
+        }
+    }
+    let numeric: Vec<bool> = (0..n)
+        .map(|i| {
+            rows.iter()
+                .all(|r| r.get(i).map_or(true, |v| v.parse::<f64>().is_ok()))
+        })
+        .collect();
+    let pad = |v: &str, w: usize, right: bool| {
+        let fill = w.saturating_sub(v.chars().count());
+        let mut s = String::new();
+        if right {
+            s.push_str(&" ".repeat(fill));
+        }
+        s.push_str(v);
+        if !right {
+            s.push_str(&" ".repeat(fill));
+        }
+        s
+    };
+    let mut out = String::new();
+    for (i, c) in columns.iter().enumerate() {
+        if i > 0 {
+            out.push_str("  ");
+        }
+        out.push_str(&pad(c, widths[i], numeric[i]));
+    }
+    out.push('\n');
+    for (i, w) in widths.iter().enumerate() {
+        if i > 0 {
+            out.push_str("  ");
+        }
+        out.push_str(&"-".repeat(*w));
+    }
+    out.push('\n');
+    for row in rows {
+        for i in 0..n {
+            if i > 0 {
+                out.push_str("  ");
+            }
+            let v = console_expand_tabs(row.get(i).map(String::as_str).unwrap_or("NULL"));
+            out.push_str(&pad(&v, widths[i], numeric[i]));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 fn command_banner(app: &App) -> String {
