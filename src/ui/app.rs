@@ -365,6 +365,9 @@ struct App {
     connect_error: Option<String>,
     /// SQL execution error shown in a modal (with caret jump on close).
     error_modal: Option<String>,
+    /// Selectable/copyable view of `error_modal` for the text_editor widget.
+    error_content: Content,
+    connect_error_content: Content,
     dialog: Option<ConnectionDraft>,
     dialog_error: Option<String>,
     /// Sidebar group names in display order (persisted in connections.json).
@@ -584,6 +587,8 @@ impl App {
             parameters_height: PANEL_HEIGHT,
             resize_drag: None,
             debug_session: DebugSession::default(),
+            error_content: Content::new(),
+            connect_error_content: Content::new(),
             debug_system: oracle_debugger_prefs::load().default_debug_system,
             close_confirm: None,
         }
@@ -1507,7 +1512,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
                 Err(error) => {
                     app.connection_status.insert(id, ConnectionStatus::Failed);
-                    app.connect_error = Some(error);
+                    app.connect_error_content = Content::with_text(&error);
+        app.connect_error = Some(error);
                     app.metrics = i18n::t("status.connect_failed");
                     if app.objects_connection == Some(id) {
                         app.clear_object_browser();
@@ -1712,7 +1718,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
                 Err(error) => {
                     app.last_output = error.clone();
-                    app.error_modal = Some(error);
+                    show_error_modal(app, error);
                     app.metrics = i18n::t("status.execute_failed");
                 }
             }
@@ -1736,7 +1742,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
                 Err(error) => {
                     app.last_output = error.clone();
-                    app.error_modal = Some(error);
+                    show_error_modal(app, error);
                     app.metrics = i18n::t("status.execute_failed");
                 }
             }
@@ -1853,7 +1859,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                         .map(|l| l.saturating_sub(app.debug_session.bind_offset).max(1));
                     app.metrics = event.status.clone();
                     if event.status.starts_with("block failed") {
-                        app.error_modal = Some(event.message.clone());
+                        show_error_modal(app, event.message.clone());
                     }
                     let mut out = event.message;
                     if !event.log.is_empty() {
@@ -1869,7 +1875,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 Err(err) => {
                     app.metrics = i18n::t("debug.failed");
                     app.last_output = err.clone();
-                    app.error_modal = Some(err);
+                    show_error_modal(app, err);
                 }
             }
             Task::none()
@@ -1966,6 +1972,7 @@ fn run_connect(app: &mut App) -> Task<Message> {
             {
                 app.busy = false;
                 app.connection_status.insert(id, ConnectionStatus::Failed);
+                app.connect_error_content = Content::with_text(&i18n::t("status.oracle_disabled"));
                 app.connect_error = Some(i18n::t("status.oracle_disabled"));
                 app.metrics = i18n::t("status.connect_failed");
                 Task::none()
@@ -2109,6 +2116,12 @@ fn auto_fill_bind_params(app: &mut App, text: &str) -> Vec<crate::ui::parameters
         out = panel.rows.clone();
     }
     out
+}
+
+/// Shows the SQL error modal and keeps a selectable editor copy of the text.
+fn show_error_modal(app: &mut App, text: String) {
+    app.error_content = Content::with_text(&text);
+    app.error_modal = Some(text);
 }
 
 fn page_select(sql: &str, kind: DbKind, offset: usize, limit: Option<usize>) -> String {
@@ -3346,16 +3359,15 @@ fn group_name_modal(app: &App) -> Element<'_, Message> {
 }
 
 fn connect_error_modal(app: &App) -> Element<'_, Message> {
-    let error = app
-        .connect_error
-        .clone()
-        .unwrap_or_else(|| i18n::t("dialog.connect_failed.unknown"));
-
     let form = column![
         text(i18n::t("dialog.connect_failed.title"))
             .size(18)
             .color(ui_theme::error()),
-        text(error).size(13).color(ui_theme::current().text),
+        text_editor(&app.connect_error_content)
+            .height(200)
+            .width(520)
+            .size(13)
+            .style(|_, status| editor_style(status)),
         row![
             Space::new().width(Fill),
             button(text(i18n::t("dialog.connect_failed.ok")).size(13))
@@ -3395,15 +3407,19 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
 /// SQL execution error dialog. Closing it moves the caret to the parsed
 /// error position (line/column from ORA-06550 / ORA-06512 / PG "LINE N:").
 fn error_modal(app: &App) -> Element<'_, Message> {
-    let error = app.error_modal.clone().unwrap_or_default();
 
     let form = column![
         text(i18n::t("dialog.sql_error.title"))
             .size(18)
             .color(ui_theme::error()),
-        scrollable(text(error).size(13).font(Font::MONOSPACE))
+        // Selectable/copyable text editor over the stored error (copy is
+        // handled inside the widget).
+        text_editor(&app.error_content)
             .height(260)
-            .width(Fill),
+            .width(520)
+            .size(13)
+            .font(Font::MONOSPACE)
+            .style(|_, status| editor_style(status)),
         row![
             Space::new().width(Fill),
             button(text(i18n::t("dialog.connect_failed.ok")).size(13))
