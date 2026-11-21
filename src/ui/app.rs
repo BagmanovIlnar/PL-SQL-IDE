@@ -5326,10 +5326,11 @@ fn sqlplus_table(columns: &[String], rows: &[Vec<String>]) -> String {
     out
 }
 
-/// Scrolls the command console to the bottom so the latest output and the
-/// SQL> prompt stay visible (sticky-bottom console).
+/// Scrolls the command console to the bottom, KEEPING the horizontal
+/// position (snap_to_end would also jump to the right edge of wide tables
+/// and the console would look blank).
 fn console_snap_to_bottom() -> Task<Message> {
-    iced::widget::operation::snap_to_end(iced::widget::Id::new("command-console"))
+    iced::widget::operation::snap_to(iced::widget::Id::new("command-console"), (None, Some(1.0)))
 }
 
 fn command_banner(app: &App) -> String {
