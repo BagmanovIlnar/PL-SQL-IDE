@@ -368,5 +368,6 @@
         "command.dialog_empty": "Нет команд",
         "command.not_connected": "Не подключено",
         "dialog.copy": "Копировать"
-    }
+    },
+    "status.copied": "Скопировано в буфер"
 }

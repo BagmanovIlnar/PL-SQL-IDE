@@ -397,6 +397,9 @@ struct App {
     connect_error: Option<String>,
     /// SQL execution error shown in a modal (with caret jump on close).
     error_modal: Option<String>,
+    /// Cmd+A pressed in a command window: the whole dialog is highlighted
+    /// until copied (Cmd+C) or typing resets it.
+    command_all_selected: bool,
     /// Open details dialog for a debug variable: (name, selectable value).
     var_details: Option<(String, String)>,
     dialog: Option<ConnectionDraft>,
@@ -485,6 +488,10 @@ enum Message {
     EditorThumbRelease,
     /// Copy a modal's error text to the clipboard.
     CopyError(String),
+    /// Cmd+A in a command window: highlight the whole console dialog.
+    CommandSelectAll,
+    /// Cmd+C in a command window: copy the whole console dialog.
+    CommandCopyAll,
     /// Put keyboard focus on the SQL> input (deferred, post-render).
     CommandFocus,
     FilterChanged(String),
@@ -632,6 +639,7 @@ impl App {
             connection_status: HashMap::new(),
             connect_error: None,
             error_modal: None,
+            command_all_selected: false,
             dialog: None,
             dialog_error: None,
             preferences: None,
@@ -1192,6 +1200,37 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
+        Message::CommandSelectAll => {
+            let console_active = app
+                .worksheets
+                .get(app.active_tab)
+                .filter(|s| s.kind == WindowKind::Command && !s.command_edit)
+                .is_some();
+            if console_active && app.error_modal.is_none() {
+                app.command_all_selected = true;
+            }
+            Task::none()
+        }
+        Message::CommandCopyAll => {
+            let console_active = app
+                .worksheets
+                .get(app.active_tab)
+                .filter(|s| s.kind == WindowKind::Command && !s.command_edit)
+                .is_some();
+            if !console_active || app.error_modal.is_some() {
+                return Task::none();
+            }
+            let Some(sheet) = app.worksheets.get(app.active_tab) else {
+                return Task::none();
+            };
+            let text = sheet.command_dialog.clone();
+            if text.is_empty() {
+                return Task::none();
+            }
+            app.command_all_selected = false;
+            app.metrics = i18n::t("status.copied");
+            iced::clipboard::write(text)
+        }
         Message::CommandFocus => {
             tracing::info!(target: "command", "focus: command window opened");
             focus_command_input()
@@ -1499,6 +1538,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::CommandInput(value) => {
             tracing::info!(target: "command", chars = value.chars().count(), "input keystroke reached SQL> line");
+            app.command_all_selected = false;
             if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                 sheet.command_input = value;
             }
@@ -2340,6 +2380,16 @@ fn subscription(app: &App) -> Subscription<Message> {
             let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
                 return None;
             };
+            // Cmd/Ctrl+A|C — handled in update (no-op outside command windows).
+            if modifiers.command() || modifiers.control() {
+                if let Key::Character(ch) = key.as_ref() {
+                    match ch.to_lowercase().as_str() {
+                        "a" | "ф" => return Some(Message::CommandSelectAll),
+                        "c" | "с" => return Some(Message::CommandCopyAll),
+                        _ => {}
+                    }
+                }
+            }
             debug_hotkey(key, modifiers)
         }),
     ])
@@ -5560,11 +5610,22 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
         let history: Element<'a, Message> = if !dialog.is_empty() {
             // Plain text (v3): clicks and keys never get stolen from the
             // SQL> input; no wrapping, both scrollbars on the container.
-            text(dialog)
+            let dialog_text = text(dialog)
                 .size(12)
                 .font(Font::MONOSPACE)
-                .wrapping(iced::widget::text::Wrapping::None)
-                .into()
+                .wrapping(iced::widget::text::Wrapping::None);
+            // Cmd+A highlights EVERYTHING; Cmd+C copies it.
+            if app.command_all_selected {
+                let accent = ui_theme::current().accent;
+                container(dialog_text)
+                    .style(move |_| container::Style {
+                        background: Some(Background::Color(Color { a: 0.30, ..accent })),
+                        ..container::Style::default()
+                    })
+                    .into()
+            } else {
+                dialog_text.into()
+            }
         } else if let Some(p) = profile.filter(|_| connected) {
             text(command_banner_for(p))
                 .size(12)

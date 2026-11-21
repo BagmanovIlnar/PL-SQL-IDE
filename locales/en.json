@@ -368,5 +368,6 @@
         "command.dialog_empty": "No commands yet",
         "command.not_connected": "Not connected",
         "dialog.copy": "Copy"
-    }
+    },
+    "status.copied": "Copied to clipboard"
 }
