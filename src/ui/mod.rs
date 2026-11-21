@@ -10,6 +10,7 @@ pub mod oracle_options;
 pub mod oracle_prefs;
 pub mod oracle_wizard;
 pub mod parameters;
+pub mod postgres_prefs;
 pub mod preferences;
 pub mod result_grid;
 pub mod theme;

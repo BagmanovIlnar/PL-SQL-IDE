@@ -344,6 +344,14 @@
         "result.loaded": "Загружено записей: {n}",
         "prefs.oracle.session_mode_tip": "Как IDE работает с сессиями Oracle. «Одна сессия» — весь UI в одном подключении; «Две сессии» — отладка идёт в отдельной сессии, основная остаётся свободной (рекомендуется для отладки); «Несколько сессий» — пул подключений.",
         "prefs.oracle.home_tip": "Каталог Oracle Client (ORACLE_HOME). Пусто — поиск в стандартных местах. Можно выбрать из найденных кнопкой списка или через «Мастер Oracle Client…».",
-        "prefs.oracle.oci_library_tip": "Путь к libclntsh (библиотека OCI Instant Client). Пусто — автоопределение. Задаётся вручную кнопкой «Указать файл…» или через «Мастер Oracle Client…»."
+        "prefs.oracle.oci_library_tip": "Путь к libclntsh (библиотека OCI Instant Client). Пусто — автоопределение. Задаётся вручную кнопкой «Указать файл…» или через «Мастер Oracle Client…».",
+        "prefs.section.postgres": "PostgreSQL",
+        "prefs.pg.ssl": "SSL-режим",
+        "prefs.pg.ssl_tip": "sslmode в строке подключения PostgreSQL. «Отключить» — без шифрования; «Предпочитать» — TLS при поддержке сервером (по умолчанию); «Требовать» — только TLS-подключения.",
+        "prefs.pg.ssl.disable": "Отключить",
+        "prefs.pg.ssl.prefer": "Предпочитать",
+        "prefs.pg.ssl.require": "Требовать",
+        "prefs.pg.timeout": "Таймаут подключения (сек)",
+        "prefs.pg.timeout_tip": "Сколько секунд ждать установления соединения (connect_timeout в URL). 0 — ждать без ограничения."
     }
 }

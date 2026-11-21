@@ -22,6 +22,9 @@ use crate::ui::oracle_prefs::{
     oracle_connection_page, OracleConnectionForm, OracleConnectionMessage,
 };
 use crate::ui::oracle_wizard::oracle_wizard_modal;
+use crate::ui::postgres_prefs::{
+    postgres_connection_page, PostgresConnectionForm, PostgresConnectionMessage,
+};
 use crate::ui::theme as ui_theme;
 
 /// Top-level Preferences category shown in the left tree.
@@ -42,6 +45,8 @@ pub enum PreferencesSection {
     UserInterface,
     /// Oracle-specific IDE options.
     Oracle,
+    /// PostgreSQL-specific IDE options.
+    Postgres,
 }
 
 impl PreferencesSection {
@@ -50,6 +55,7 @@ impl PreferencesSection {
         match self {
             Self::UserInterface => "prefs.section.user_interface",
             Self::Oracle => "prefs.section.oracle",
+            Self::Postgres => "prefs.section.postgres",
         }
     }
 
@@ -62,6 +68,7 @@ impl PreferencesSection {
     pub fn pages(self) -> &'static [PreferencesPage] {
         match self {
             Self::UserInterface => &[PreferencesPage::UiAppearance],
+            Self::Postgres => &[PreferencesPage::PostgresConnection],
             Self::Oracle => &[
                 PreferencesPage::OracleConnection,
                 PreferencesPage::OracleOptions,
@@ -98,6 +105,7 @@ impl PreferencesSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreferencesPage {
     UiAppearance,
+    PostgresConnection,
     OracleConnection,
     OracleOptions,
     OracleCompiler,
@@ -113,6 +121,7 @@ impl PreferencesPage {
     pub fn key(self) -> &'static str {
         match self {
             Self::UiAppearance => "prefs.page.appearance",
+            Self::PostgresConnection => "prefs.page.connection",
             Self::OracleConnection => "prefs.page.connection",
             Self::OracleOptions => "prefs.page.options",
             Self::OracleCompiler => "prefs.page.compiler",
@@ -133,6 +142,7 @@ impl PreferencesPage {
     pub fn section(self) -> PreferencesSection {
         match self {
             Self::UiAppearance => PreferencesSection::UserInterface,
+            Self::PostgresConnection => PreferencesSection::Postgres,
             Self::OracleConnection
             | Self::OracleOptions
             | Self::OracleCompiler
@@ -168,6 +178,8 @@ pub struct PreferencesState {
     pub available: Vec<LocaleInfo>,
     /// Draft Oracle → Connection form (saved on OK).
     pub oracle_connection: OracleConnectionForm,
+    /// Draft PostgreSQL → Connection form (saved on OK).
+    pub postgres_connection: PostgresConnectionForm,
     /// Draft Oracle → Options form (saved on OK).
     pub oracle_options: OracleOptionsForm,
     /// Draft Oracle → Compiler form (saved on OK).
@@ -197,12 +209,14 @@ impl PreferencesState {
             language,
             available,
             oracle_connection: OracleConnectionForm::load(),
+            postgres_connection: PostgresConnectionForm::load(),
             oracle_options: OracleOptionsForm::load(),
             oracle_compiler: OracleCompilerForm::load(),
             oracle_debugger: OracleDebuggerForm::load(),
             expanded: vec![
                 PreferencesSection::UserInterface,
                 PreferencesSection::Oracle,
+                PreferencesSection::Postgres,
             ],
         }
     }
@@ -247,6 +261,8 @@ pub enum PreferencesMessage {
     LanguageChanged(LocaleInfo),
     /// Oracle → Connection page controls.
     OracleConnection(OracleConnectionMessage),
+    /// PostgreSQL → Connection page controls.
+    PostgresConnection(PostgresConnectionMessage),
     /// Oracle → Options page controls.
     OracleOptions(OracleOptionsMessage),
     /// Oracle → Compiler page controls.
@@ -284,6 +300,10 @@ impl PreferencesState {
                 self.oracle_connection.update(message);
                 false
             }
+            PreferencesMessage::PostgresConnection(message) => {
+                self.postgres_connection.update(message);
+                false
+            }
             PreferencesMessage::OracleOptions(message) => {
                 self.oracle_options.update(message);
                 false
@@ -301,6 +321,7 @@ impl PreferencesState {
             PreferencesMessage::Ok => {
                 let _ = i18n::set_locale(&self.language.code);
                 self.oracle_connection.save();
+                self.postgres_connection.save();
                 self.oracle_options.save();
                 self.oracle_compiler.save();
                 self.oracle_debugger.save();
@@ -314,6 +335,8 @@ impl PreferencesState {
 fn preferences_page(state: &PreferencesState) -> Element<'_, PreferencesMessage> {
     match state.selected {
         PreferencesPage::UiAppearance => appearance_page(state),
+        PreferencesPage::PostgresConnection => postgres_connection_page(&state.postgres_connection)
+            .map(PreferencesMessage::PostgresConnection),
         PreferencesPage::OracleConnection => oracle_connection_page(&state.oracle_connection)
             .map(PreferencesMessage::OracleConnection),
         PreferencesPage::OracleOptions => {

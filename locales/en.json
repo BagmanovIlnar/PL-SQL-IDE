@@ -344,6 +344,14 @@
         "result.loaded": "Rows loaded: {n}",
         "prefs.oracle.session_mode_tip": "How the IDE uses Oracle sessions. Single Session — one connection for everything; Dual Session — debugging runs in a dedicated session while the main one stays free (recommended for debugging); Multi Session — a connection pool.",
         "prefs.oracle.home_tip": "Oracle Client directory (ORACLE_HOME). Empty — autodetect from standard locations. Pick from discovered homes or use the Oracle Client Wizard.",
-        "prefs.oracle.oci_library_tip": "Path to libclntsh (OCI Instant Client library). Empty — autodetect. Set manually with Locate file or via the Oracle Client Wizard."
+        "prefs.oracle.oci_library_tip": "Path to libclntsh (OCI Instant Client library). Empty — autodetect. Set manually with Locate file or via the Oracle Client Wizard.",
+        "prefs.section.postgres": "PostgreSQL",
+        "prefs.pg.ssl": "SSL mode",
+        "prefs.pg.ssl_tip": "sslmode in the PostgreSQL connection URL. Disable — no encryption; Prefer — TLS when the server supports it (default); Require — TLS connections only.",
+        "prefs.pg.ssl.disable": "Disable",
+        "prefs.pg.ssl.prefer": "Prefer",
+        "prefs.pg.ssl.require": "Require",
+        "prefs.pg.timeout": "Connect timeout (sec)",
+        "prefs.pg.timeout_tip": "How many seconds to wait while establishing a connection (connect_timeout in the URL). 0 — wait indefinitely."
     }
 }

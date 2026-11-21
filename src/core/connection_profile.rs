@@ -85,11 +85,18 @@ impl ConnectionProfile {
         )
     }
 
-    /// Builds a PostgreSQL URL for the Phase 0 spike.
+    /// Builds a PostgreSQL URL; sslmode / timeout come from prefs.
     pub fn postgres_url(&self) -> String {
         format!(
-            "postgres://{}:{}@{}:{}/{}",
-            self.username, self.password, self.host, self.port, self.database
+            "postgres://{}:{}@{}:{}/{}?{}",
+            self.username,
+            self.password,
+            self.host,
+            self.port,
+            self.database,
+            crate::core::postgres_connection_prefs::url_query(
+                &crate::core::postgres_connection_prefs::load()
+            )
         )
     }
 
