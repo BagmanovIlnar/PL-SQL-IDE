@@ -357,9 +357,7 @@
         "prefs.pg.ssl.require": "Require",
         "prefs.pg.timeout": "Connect timeout (sec)",
         "prefs.pg.timeout_tip": "How many seconds to wait while establishing a connection (connect_timeout in the URL). 0 — wait indefinitely.",
-        "sidebar": {
-            "hide": "Hide sidebar",
-            "show": "Show sidebar"
-        }
+        "sidebar.hide": "Hide sidebar",
+        "sidebar.show": "Show sidebar"
     }
 }
