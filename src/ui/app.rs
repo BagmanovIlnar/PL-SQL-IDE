@@ -1283,7 +1283,9 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             run_spike(app, FetchMode::Execute)
         }
         Message::MenuStop => {
-            if app.debug_session.active {
+            let owns_debug = app.debug_session.active
+                && app.debug_session.tab == Some(app.active_tab);
+            if owns_debug {
                 return app.apply_debug_command(DebugCommand::Stop);
             }
             if !app.busy {
@@ -3869,12 +3871,15 @@ fn worksheet_toolbar(app: &App) -> Element<'static, Message> {
     let stop = toolbar_icon_button(
         square().size(14),
         i18n::t("toolbar.stop"),
-        app.busy || app.debug_session.active,
+        app.busy
+            || (app.debug_session.active
+                && app.debug_session.tab == Some(app.active_tab)),
         Message::MenuStop,
     );
     let bar = match kind {
         Some(WindowKind::Sql | WindowKind::Command) => row![execute, stop],
-        Some(WindowKind::Test) => row![debug],
+        // Test: debug controls plus script Execute/Stop (run without debugger).
+        Some(WindowKind::Test) => row![debug, toolbar_divider(), execute, stop],
         _ => row![debug],
     };
     container(bar.spacing(6).align_y(Vertical::Center))
