@@ -358,6 +358,13 @@
         "prefs.pg.timeout": "Таймаут подключения (сек)",
         "prefs.pg.timeout_tip": "Сколько секунд ждать установления соединения (connect_timeout в URL). 0 — ждать без ограничения.",
         "sidebar.hide": "Скрыть панель",
-        "sidebar.show": "Показать панель"
+        "sidebar.show": "Показать панель",
+        "toolbar.pause": "Пауза",
+        "toolbar.resume": "Продолжить",
+        "status.paused": "Выполнение приостановлено",
+        "status.resumed": "Выполнение продолжено",
+        "command.dialog": "Диалог",
+        "command.edit": "Правка",
+        "command.dialog_empty": "Нет команд"
     }
 }

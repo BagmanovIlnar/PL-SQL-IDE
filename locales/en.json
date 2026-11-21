@@ -358,6 +358,13 @@
         "prefs.pg.timeout": "Connect timeout (sec)",
         "prefs.pg.timeout_tip": "How many seconds to wait while establishing a connection (connect_timeout in the URL). 0 — wait indefinitely.",
         "sidebar.hide": "Hide sidebar",
-        "sidebar.show": "Show sidebar"
+        "sidebar.show": "Show sidebar",
+        "toolbar.pause": "Pause",
+        "toolbar.resume": "Resume",
+        "status.paused": "Execution paused",
+        "status.resumed": "Execution resumed",
+        "command.dialog": "Dialog",
+        "command.edit": "Edit",
+        "command.dialog_empty": "No commands yet"
     }
 }

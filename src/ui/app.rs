@@ -20,8 +20,8 @@ use iced::{
     Background, Color, Element, Event, Fill, Font, Padding, Point, Size, Subscription, Task, Theme,
 };
 use iced_fonts::lucide::{
-    chevron_down, chevron_right, database, folder_plus, panel_left_close, panel_left_open, pencil,
-    play, plug, plus, square, trash, unplug,
+    chevron_down, chevron_right, database, folder_plus, panel_left_close, panel_left_open, pause,
+    pencil, play, plug, plus, square, trash, unplug,
 };
 use iced_fonts::LUCIDE_FONT_BYTES;
 
@@ -172,6 +172,14 @@ struct Worksheet {
     file_path: Option<PathBuf>,
     /// True when buffer differs from last save (or was edited and never saved).
     dirty: bool,
+    /// Command window: active inner tab (false = Dialog, true = Edit).
+    command_edit: bool,
+    /// Command window dialog: accumulated "SQL> …" history with output.
+    command_dialog: String,
+    /// Output held back while paused; flushed into the dialog on resume.
+    command_pending: String,
+    /// Command window: execution paused (dialog updates held back).
+    command_paused: bool,
 }
 
 impl Worksheet {
@@ -436,6 +444,8 @@ struct App {
     sidebar_width: f32,
     /// Left sidebar shown/hidden via the panel toggle button.
     sidebar_visible: bool,
+    /// Command text of the in-flight Command-window run (dialog echo).
+    command_echo: Option<String>,
     /// Height of the parameters panel under the editor (user-resizable).
     parameters_height: f32,
     /// Active panel-border drag, if any.
@@ -527,6 +537,10 @@ enum Message {
     ConnectTick,
     /// Show or hide the left sidebar.
     ToggleSidebar,
+    /// Command window: select the inner tab (false = Dialog, true = Edit).
+    CommandTab(bool),
+    /// Command window: pause/resume execution (dialog updates held back).
+    MenuPause,
     GroupDialogSave,
     GroupDialogCancel,
     /// Attempt to open a live session for the selected Connections profile.
@@ -635,6 +649,7 @@ impl App {
             objects_connection: None,
             sidebar_width: SIDEBAR_WIDTH_DEFAULT,
             sidebar_visible: true,
+            command_echo: None,
             parameters_height: PANEL_HEIGHT,
             resize_drag: None,
             debug_session: DebugSession::default(),
@@ -715,6 +730,10 @@ impl App {
             breakpoints: HashSet::new(),
             file_path: None,
             dirty: false,
+            command_edit: false,
+            command_dialog: String::new(),
+            command_pending: String::new(),
+            command_paused: false,
         });
         self.active_tab = self.worksheets.len() - 1;
         self.completion.clear();
@@ -1441,6 +1460,30 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             app.metrics = i18n::t("status.cancelled");
             Task::none()
         }
+        Message::CommandTab(edit) => {
+            if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                sheet.command_edit = edit;
+            }
+            Task::none()
+        }
+        Message::MenuPause => {
+            let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
+                return Task::none();
+            };
+            if sheet.kind != WindowKind::Command || !app.busy {
+                return Task::none();
+            }
+            if sheet.command_paused {
+                sheet.command_paused = false;
+                let pending = std::mem::take(&mut sheet.command_pending);
+                sheet.command_dialog.push_str(&pending);
+                app.metrics = i18n::t("status.resumed");
+            } else {
+                sheet.command_paused = true;
+                app.metrics = i18n::t("status.paused");
+            }
+            Task::none()
+        }
         Message::SelectConnection(id) => {
             app.selected_connection = Some(id);
             app.selected_group = None;
@@ -1880,7 +1923,18 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                         rows = payload.rows.len(),
                         "grid updated"
                     );
+                    let output = payload.output.clone();
                     app.last_output = payload.output;
+                    if let Some(echo) = app.command_echo.take() {
+                        if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                            let entry = format!("SQL> {}\n{output}\n\n", echo.trim());
+                            if sheet.command_paused {
+                                sheet.command_pending.push_str(&entry);
+                            } else {
+                                sheet.command_dialog.push_str(&entry);
+                            }
+                        }
+                    }
                     app.metrics = i18n::t("status.execute_completed");
                     let mode = app.fetch_mode;
                     let bind_back = payload.columns.len() == 2
@@ -1926,6 +1980,16 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     }
                 }
                 Err(error) => {
+                    if let Some(echo) = app.command_echo.take() {
+                        if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                            let entry = format!("SQL> {}\n{error}\n\n", echo.trim());
+                            if sheet.command_paused {
+                                sheet.command_pending.push_str(&entry);
+                            } else {
+                                sheet.command_dialog.push_str(&entry);
+                            }
+                        }
+                    }
                     show_error_modal(app, error);
                     app.metrics = i18n::t("status.execute_failed");
                 }
@@ -2433,6 +2497,12 @@ fn run_spike(app: &mut App, mode: FetchMode) -> Task<Message> {
 
     let sql = app.active_content().map(|content| content.text());
     let sql_text = sql.clone().unwrap_or_default();
+    // Command window: remember what we are running to echo it in the Dialog.
+    app.command_echo = app
+        .worksheets
+        .get(app.active_tab)
+        .filter(|sheet| sheet.kind == WindowKind::Command)
+        .map(|_| sql_text.clone());
     // Test window: discover `:NAME` binds, auto-fill the parameters panel,
     // and wrap the block so panel values bind IN and OUT values come back.
     let sql = if profile.db_kind == DbKind::Oracle
@@ -4915,7 +4985,7 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .height(Fill);
 
-    if sheet.kind.shows_parameters() {
+    let editor: Element<'_, Message> = if sheet.kind.shows_parameters() {
         let db_kind = sheet
             .connection_id
             .and_then(|id| {
@@ -4971,7 +5041,106 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
         .into()
     } else {
         editor_stack.into()
+    };
+    if sheet.kind == WindowKind::Command {
+        return command_pane(app, editor);
     }
+    editor
+}
+
+/// Command window (like PL/SQL Developer): Execute / Pause / Stop buttons
+/// above an inner tabsheet with the Dialog (session history) and Edit tabs.
+fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, Message> {
+    let Some(sheet) = app.worksheets.get(app.active_tab) else {
+        return editor;
+    };
+    let paused = sheet.command_paused;
+    let edit_tab = sheet.command_edit;
+    let dialog = sheet.command_dialog.clone();
+    let connected = app.active_worksheet_profile().is_some();
+
+    // Availability follows the run state: Execute when idle and connected;
+    // Pause and Stop only while a run is in flight.
+    let exec = toolbar_icon_button(
+        play().size(14),
+        i18n::t("ribbon.execute"),
+        !app.busy && connected,
+        Message::MenuExecute,
+    );
+    let pause = toolbar_icon_button(
+        if paused {
+            play().size(14)
+        } else {
+            pause().size(14)
+        },
+        if paused {
+            i18n::t("toolbar.resume")
+        } else {
+            i18n::t("toolbar.pause")
+        },
+        app.busy,
+        Message::MenuPause,
+    );
+    let stop = toolbar_icon_button(
+        square().size(14),
+        i18n::t("toolbar.stop"),
+        app.busy,
+        Message::MenuStop,
+    );
+    let bar = container(row![exec, pause, stop].spacing(6).align_y(Vertical::Center))
+        .padding(Padding::from([4, 10]))
+        .width(Fill)
+        .style(|_| container::Style {
+            background: Some(Background::Color(ui_theme::current().ribbon_body_bg)),
+            text_color: Some(ui_theme::current().text),
+            ..container::Style::default()
+        });
+
+    let tab_button = |label: String, active: bool, message: Message| -> Element<'a, Message> {
+        button(text(label).size(11))
+            .padding(Padding::from([4, 12]))
+            .style(move |_, status| tab_button_style(active, status))
+            .on_press(message)
+            .into()
+    };
+    let tabs = row![
+        tab_button(
+            i18n::t("command.dialog"),
+            !edit_tab,
+            Message::CommandTab(false),
+        ),
+        tab_button(i18n::t("command.edit"), edit_tab, Message::CommandTab(true),),
+    ]
+    .spacing(2)
+    .padding(Padding::from([4, 10]))
+    .align_y(Vertical::Center);
+
+    let body: Element<'_, Message> = if edit_tab {
+        editor
+    } else {
+        scrollable(
+            text(if dialog.is_empty() {
+                i18n::t("command.dialog_empty")
+            } else {
+                dialog
+            })
+            .size(12)
+            .font(Font::MONOSPACE),
+        )
+        .height(Fill)
+        .into()
+    };
+
+    column![
+        bar,
+        rule::horizontal(1).style(|_| rule_style()),
+        tabs,
+        rule::horizontal(1).style(|_| rule_style()),
+        body,
+    ]
+    .height(Fill)
+    .width(Fill)
+    .into()
 }
 
 /// Monospace list used by the Stack and Variables tabs of the debug panel.
