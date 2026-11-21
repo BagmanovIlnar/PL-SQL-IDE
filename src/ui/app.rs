@@ -178,6 +178,9 @@ struct Worksheet {
     command_edit: bool,
     /// Command window dialog: accumulated "SQL> …" history with output.
     command_dialog: String,
+    /// Selectable view of `command_dialog`; rebuilt on append. Typed keys in
+    /// it are routed to the SQL> input — selection never breaks typing.
+    command_dialog_view: Content,
     /// Output held back while paused; flushed into the dialog on resume.
     command_pending: String,
     /// Line index of the current entry (its echo) in `command_dialog`, so the
@@ -485,6 +488,8 @@ enum Message {
     EditorThumbRelease,
     /// Copy a modal's error text to the clipboard.
     CopyError(String),
+    /// Mouse/keys in the console dialog: selection renders; keys route.
+    ConsoleAction(Action),
     /// Put keyboard focus on the SQL> input (deferred, post-render).
     CommandFocus,
     FilterChanged(String),
@@ -740,6 +745,7 @@ impl App {
             dirty: false,
             command_edit: false,
             command_dialog: String::new(),
+            command_dialog_view: Content::new(),
             command_pending: String::new(),
             command_entry_line: 0,
             command_paused: false,
@@ -1192,6 +1198,41 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
+        Message::ConsoleAction(action) => {
+            tracing::info!(target: "command", ?action, "console action");
+            let mut enter = false;
+            let mut focus_back = false;
+            match action {
+                Action::Edit(edit) => {
+                    focus_back = true;
+                    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                        match edit {
+                            Edit::Insert(c) => sheet.command_input.push(c),
+                            Edit::Paste(text) => sheet.command_input.push_str(&text),
+                            Edit::Backspace => {
+                                sheet.command_input.pop();
+                            }
+                            Edit::Enter => enter = true,
+                            Edit::Indent | Edit::Unindent | Edit::Delete => {}
+                        }
+                    }
+                }
+                other => {
+                    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                        sheet.command_dialog_view.perform(other);
+                        let cursor = sheet.command_dialog_view.cursor();
+                        tracing::info!(target: "command", selected = cursor.selection.is_some(), "selection after action");
+                    }
+                }
+            }
+            if enter {
+                update_inner(app, Message::CommandSubmit)
+            } else if focus_back {
+                focus_command_input()
+            } else {
+                Task::none()
+            }
+        }
         Message::CommandFocus => focus_command_input(),
         Message::VarDetails(name, value) => {
             app.var_details = Some((name, value));
@@ -5280,9 +5321,10 @@ fn console_expand_tabs(value: &str) -> String {
     value.replace('\t', "    ")
 }
 
-/// Appends console text to the dialog history.
+/// Appends console text to the dialog history and rebuilds its view.
 fn dialog_push(sheet: &mut Worksheet, value: &str) {
     sheet.command_dialog.push_str(value);
+    sheet.command_dialog_view = Content::with_text(&sheet.command_dialog);
 }
 
 /// SQL*Plus terminators: a lone `/` line means "run" and a trailing `;` after
@@ -5555,11 +5597,14 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
             })
             .unwrap_or(false);
         let history: Element<'a, Message> = if !dialog.is_empty() {
-            // Plain text (v3): stable, never steals keys from the SQL> input.
-            text(dialog)
+            // Selectable dialog: DEFAULT editor style (system selection
+            // highlight), no wrapping; typed keys route to the SQL> input.
+            text_editor(&sheet.command_dialog_view)
                 .size(12)
                 .font(Font::MONOSPACE)
+                .height(iced::Length::Shrink)
                 .wrapping(iced::widget::text::Wrapping::None)
+                .on_action(Message::ConsoleAction)
                 .into()
         } else if let Some(p) = profile.filter(|_| connected) {
             text(command_banner_for(p))
