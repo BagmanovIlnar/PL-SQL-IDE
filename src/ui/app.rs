@@ -97,7 +97,7 @@ pub fn run() -> iced::Result {
                 Theme::Light
             }
         })
-        .subscription(subscription)
+        .subscription(|app| subscription(app))
         .font(LUCIDE_FONT_BYTES)
         .centered()
         .window_size((1400.0, 900.0))
@@ -446,6 +446,10 @@ struct App {
     close_confirm: Option<usize>,
     /// Editor viewport size captured during layout (Responsive wrapper).
     editor_viewport: Cell<Size>,
+    /// Connection with a Connect attempt in flight (spinner shown).
+    connecting: Option<ConnectionId>,
+    /// Spinner animation frame (advanced by ConnectTick).
+    connect_frame: usize,
     /// Max editor scroll (content height − viewport), captured during layout.
     editor_scroll_max: Cell<f32>,
     /// True while the editor scrollbar thumb is being dragged.
@@ -517,6 +521,8 @@ enum Message {
     GroupDraftChanged(String),
     /// Parent group selected in the Add-group dialog.
     GroupDraftParentChanged(String),
+    /// Advance the connecting-spinner animation frame.
+    ConnectTick,
     GroupDialogSave,
     GroupDialogCancel,
     /// Attempt to open a live session for the selected Connections profile.
@@ -633,6 +639,8 @@ impl App {
             debug_system: oracle_debugger_prefs::load().default_debug_system,
             close_confirm: None,
             editor_viewport: Cell::new(Size::ZERO),
+            connecting: None,
+            connect_frame: 0,
             editor_scroll_max: Cell::new(0.0),
             thumb_drag: false,
         }
@@ -1636,8 +1644,13 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
             let _ = id;
             Task::none()
         }
+        Message::ConnectTick => {
+            app.connect_frame = app.connect_frame.wrapping_add(1);
+            Task::none()
+        }
         Message::ConnectFinished(id, result) => {
             app.busy = false;
+            app.connecting = None;
             match result {
                 Ok(()) => {
                     app.connection_status
@@ -2102,16 +2115,27 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
     }
 }
 
-fn subscription(_app: &App) -> Subscription<Message> {
-    iced::event::listen_with(|event, _status, _window| {
-        if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = &event {
-            return Some(Message::EditorThumbRelease);
-        }
-        let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
-            return None;
-        };
-        debug_hotkey(key, modifiers)
-    })
+fn subscription(app: &App) -> Subscription<Message> {
+    // Animate the connecting spinner while a Connect attempt is running.
+    let spinner = app
+        .connecting
+        .is_some()
+        .then(|| {
+            iced::time::every(std::time::Duration::from_millis(120)).map(|_| Message::ConnectTick)
+        })
+        .unwrap_or_else(Subscription::none);
+    Subscription::batch([
+        spinner,
+        iced::event::listen_with(|event, _status, _window| {
+            if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = &event {
+                return Some(Message::EditorThumbRelease);
+            }
+            let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
+                return None;
+            };
+            debug_hotkey(key, modifiers)
+        }),
+    ])
 }
 
 fn debug_hotkey(key: Key, modifiers: Modifiers) -> Option<Message> {
@@ -2144,6 +2168,7 @@ fn run_connect(app: &mut App) -> Task<Message> {
 
     let id = profile.id;
     app.busy = true;
+    app.connecting = Some(id);
     app.connect_error = None;
     app.metrics = i18n::t_args("status.connecting", &[("name", profile.name.as_str())]);
 
@@ -2193,6 +2218,7 @@ fn run_connect(app: &mut App) -> Task<Message> {
             #[cfg(not(feature = "oracle"))]
             {
                 app.busy = false;
+                app.connecting = None;
                 app.connection_status.insert(id, ConnectionStatus::Failed);
                 app.connect_error_content = Content::with_text(&i18n::t("status.oracle_disabled"));
                 app.connect_error = Some(i18n::t("status.oracle_disabled"));
@@ -3146,6 +3172,9 @@ fn ribbon(app: &App) -> Element<'_, Message> {
     column![tab_strip, body_band].into()
 }
 
+/// Braille spinner frames shown while a Connect attempt is in flight.
+const CONNECT_SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Message> {
     let selected = app.selected_connection == Some(profile.id);
     let id = profile.id;
@@ -3157,7 +3186,21 @@ fn connection_row(app: &App, profile: &ConnectionProfile) -> Element<'static, Me
         ConnectionStatus::Failed => label_text.color(ui_theme::error()),
         ConnectionStatus::Unknown => label_text,
     };
-    button(container(label_text).width(Fill).align_x(Horizontal::Left))
+    let body: Element<'static, Message> = if app.connecting == Some(id) {
+        // Spinner animation to the left of the name while connecting.
+        row![
+            text(CONNECT_SPINNER[app.connect_frame % CONNECT_SPINNER.len()])
+                .size(12)
+                .color(ui_theme::current().accent),
+            label_text,
+        ]
+        .spacing(6)
+        .align_y(Vertical::Center)
+        .into()
+    } else {
+        label_text.into()
+    };
+    button(container(body).width(Fill).align_x(Horizontal::Left))
         .width(Fill)
         .padding(Padding::from([8, 10]))
         .style(move |_, btn_status| connection_row_style(selected, status, btn_status))
