@@ -76,6 +76,10 @@ static SESSION_STATE: LazyLock<Mutex<HashMap<ConnectionId, LiveDebugState>>> =
 #[cfg(feature = "oracle")]
 static SESSION_SOURCE: LazyLock<Mutex<HashMap<ConnectionId, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Bind-parameter OUT values fetched by the finished debug block, delivered
+/// to the next finished event and written back into the parameters panel.
+static BINDOUTS: LazyLock<Mutex<HashMap<ConnectionId, Vec<(String, String)>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 #[cfg(feature = "oracle")]
 static JDWP_SESSIONS: LazyLock<Mutex<HashMap<ConnectionId, super::jdwp::JdwpSession>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -1304,14 +1308,56 @@ fn instrumented_launch(
                 let state = finished.clone();
                 std::thread::spawn(move || {
                     let mut target = target;
-                    let outcome = target
-                        .execute(&instrumented, &[])
-                        .map(|_| ())
-                        .map_err(|err| format!("block: {err}"));
+                    let has_outs = instrumented.starts_with("DECLARE\nPLSQLIDE_P");
+                    let mut bind_outs: Vec<(String, String)> = Vec::new();
+                    let outcome = if has_outs {
+                        // Wrapper opens :PLSQLIDE_OUT — bind the cursor and
+                        // read the parameter values back after the block ends.
+                        match target
+                            .execute(
+                                &instrumented,
+                                &[&None::<oracle::sql_type::RefCursor>],
+                            )
+                        {
+                            Ok(mut stmt) => {
+                                if let Ok(mut refcur) =
+                                    stmt.bind_value::<usize, oracle::sql_type::RefCursor>(1)
+                                {
+                                    if let Ok(rows) = refcur.query() {
+                                        for row in rows.flatten() {
+                                            let name = row
+                                                .get::<usize, Option<String>>(0)
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or_default();
+                                            let val = row
+                                                .get::<usize, Option<String>>(1)
+                                                .ok()
+                                                .flatten()
+                                                .unwrap_or_else(|| "NULL".into());
+                                            bind_outs.push((name, val));
+                                        }
+                                    }
+                                }
+                                Ok(())
+                            }
+                            Err(err) => Err(format!("block: {err}")),
+                        }
+                    } else {
+                        target
+                            .execute(&instrumented, &[])
+                            .map(|_| ())
+                            .map_err(|err| format!("block: {err}"))
+                    };
                     tracing::info!("debug: target execute returned {outcome:?}");
                     if let Err(text) = &outcome {
                         if let Ok(mut guard) = state.error.lock() {
                             *guard = Some(text.clone());
+                        }
+                    }
+                    if !bind_outs.is_empty() {
+                        if let Ok(mut guard) = BINDOUTS.lock() {
+                            guard.insert(id2, bind_outs);
                         }
                     }
                     state.finished.store(true, Ordering::SeqCst);
@@ -1322,6 +1368,15 @@ fn instrumented_launch(
 
             let (status, line, msgs) = wait_pause(id, &pipe, &finished, resume_first)?;
             log.extend(msgs);
+            if status == "program finished" {
+                if let Ok(mut guard) = BINDOUTS.lock() {
+                    if let Some(outs) = guard.remove(&id) {
+                        for (name, val) in outs {
+                            log.push(format!("BINDOUT {name}={val}"));
+                        }
+                    }
+                }
+            }
             Ok(DebugEngineEvent {
                 active: true,
                 system: DebugSystem::DbmsDebug,

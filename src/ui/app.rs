@@ -839,7 +839,7 @@ impl App {
             let text = source.clone();
             let params = auto_fill_bind_params(self, &text);
             if !params.is_empty() {
-                let (wrapped, offset) = crate::ui::parameters::bind_wrap(&text, &params, false);
+                let (wrapped, offset) = crate::ui::parameters::bind_wrap(&text, &params, true);
                 source = wrapped;
                 self.debug_session.bind_offset = offset;
             }
@@ -1889,6 +1889,33 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.metrics = event.status.clone();
                     if event.status.starts_with("block failed") {
                         show_error_modal(app, event.message.clone());
+                    }
+                    // Bind-parameter OUT values came back with the finished
+                    // event — write them into the parameters panel.
+                    if over {
+                        for entry in &event.log {
+                            if let Some(rest) = entry.strip_prefix("BINDOUT ") {
+                                if let Some((name, val)) = rest.split_once('=') {
+                                    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                                        if let Some(p) = sheet
+                                            .parameters
+                                            .rows
+                                            .iter_mut()
+                                            .find(|p| {
+                                                p.name.to_ascii_uppercase()
+                                                    == name.to_ascii_uppercase()
+                                            })
+                                        {
+                                            p.value = if val == "NULL" {
+                                                String::new()
+                                            } else {
+                                                val.to_string()
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     let mut out = event.message;
                     if !event.log.is_empty() {

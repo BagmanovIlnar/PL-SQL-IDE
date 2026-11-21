@@ -31,15 +31,14 @@ BEGIN
       :TEST := 'cdcd';
       v_x := 1;
 END;";
-    // Bind the :TEST parameter the way the Test window does (no capture —
-    // the debug path needs no GTT).
-    let params = plsqlide::ui::parameters::parse_binds(source)
+    let mut params = plsqlide::ui::parameters::parse_binds(source)
         .into_iter()
         .map(|n| plsqlide::ui::parameters::Parameter::new(
             n, plsqlide::ui::parameters::ParamDataType::Oracle(
                 plsqlide::ui::parameters::OracleType::Varchar2)))
         .collect::<Vec<_>>();
-    let (source, offset) = plsqlide::ui::parameters::bind_wrap(source, &params, false);
+    params[0].value = "внутри".to_string();
+    let (source, offset) = plsqlide::ui::parameters::bind_wrap(source, &params, true);
     println!("bind offset: {offset}");
     println!("--- source ---\n{source}\n");
 
