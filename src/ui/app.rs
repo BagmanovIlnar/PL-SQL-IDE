@@ -1482,7 +1482,8 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 if sheet.command_dialog.is_empty() {
                     sheet.command_dialog.push_str(&banner);
                 }
-                sheet.command_dialog.push_str(&format!("SQL> {cmd}\n"));
+                let echo = console_expand_tabs(cmd.trim_end_matches(['\n', '\r']));
+                sheet.command_dialog.push_str(&format!("SQL> {echo}\n"));
                 cmd
             };
             // Echo is already in the dialog — only the output comes later.
@@ -1949,10 +1950,11 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.last_output = payload.output;
                     if let Some(echo) = app.command_echo.take() {
                         if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                            let output = console_expand_tabs(&output);
                             let entry = if echo.is_empty() {
                                 format!("{output}\n\n")
                             } else {
-                                format!("SQL> {}\n{output}\n\n", echo.trim())
+                                format!("SQL> {}\n{output}\n\n", console_expand_tabs(echo.trim()))
                             };
                             if sheet.command_paused {
                                 sheet.command_pending.push_str(&entry);
@@ -2011,7 +2013,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                             let entry = if echo.is_empty() {
                                 format!("{error}\n\n")
                             } else {
-                                format!("SQL> {}\n{error}\n\n", echo.trim())
+                                format!("SQL> {}\n{error}\n\n", console_expand_tabs(echo.trim()))
                             };
                             if sheet.command_paused {
                                 sheet.command_pending.push_str(&entry);
@@ -5105,6 +5107,12 @@ fn command_banner_for(profile: &ConnectionProfile) -> String {
             profile.username, profile.host, profile.port, profile.database
         )
     }
+}
+
+/// cosmic-text (the text engine) does not render tab glyphs at all — expand
+/// them to 4 spaces so indentation survives in the console.
+fn console_expand_tabs(value: &str) -> String {
+    value.replace('\t', "    ")
 }
 
 fn command_banner(app: &App) -> String {
