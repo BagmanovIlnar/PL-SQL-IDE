@@ -6363,7 +6363,9 @@ mod command_dialog_tests {
             update(&mut app, Message::CommandSubmit);
             let run_id = app.spike_run;
             let sheet = app.worksheets.get(app.active_tab).unwrap();
-            assert!(sheet.command_dialog.contains(&format!("SQL> {cmd}")));
+            assert!(sheet
+                .command_dialog
+                .contains(&format!("SQL> {}", cmd.trim_end_matches(';'))));
             assert!(sheet.command_input.is_empty());
             update(
                 &mut app,
@@ -6382,8 +6384,9 @@ mod command_dialog_tests {
             assert!(sheet.command_dialog.contains(value));
         }
         let sheet = &app.worksheets[app.active_tab];
-        assert!(sheet.command_dialog.contains("SQL> select 1 from dual;"));
-        assert!(sheet.command_dialog.contains("SQL> select 2 from dual;"));
+        // Terminator is client-side: echo shows the statement without `;`.
+        assert!(sheet.command_dialog.contains("SQL> select 1 from dual"));
+        assert!(sheet.command_dialog.contains("SQL> select 2 from dual"));
     }
 }
 
