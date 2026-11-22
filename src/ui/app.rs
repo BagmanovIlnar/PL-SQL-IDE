@@ -2761,6 +2761,23 @@ fn run_spike_with_sql(
             text
         }
     });
+    // Postgres console `a; b; c`: only the FIRST statement runs now — the
+    // rest go to the queue (echo/answer per statement). The submit path
+    // pre-queues its own, so an empty queue means the Edit/Execute path.
+    let mut pg_multi_rest: Vec<String> = Vec::new();
+    let pg_multi_first =
+        if command_window && profile.db_kind == DbKind::Postgres && app.command_queue.is_empty() {
+            let list = split_console_statements(&sql_text);
+            if list.len() > 1 {
+                pg_multi_rest = list[1..].to_vec();
+                Some(list[0].clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+    let sql = pg_multi_first.clone().map(Some).unwrap_or(sql);
     // Command window: remember what we are running to echo it in the Dialog.
     // Submit path pre-sets Some("") (echo already shown) — do not clobber it.
     if app.command_echo.is_none() {
@@ -2770,22 +2787,11 @@ fn run_spike_with_sql(
                 sheet.command_edit = false;
                 // Postgres `a; b; c` pasted into the buffer: echo/run the
                 // first statement now, queue the rest (echo/answer per one).
-                let pg_multi = profile.db_kind == DbKind::Postgres && {
-                    let list = split_console_statements(&sql_text);
-                    if list.len() > 1 {
-                        app.command_queue = list[1..].to_vec();
-                        true
-                    } else {
-                        false
-                    }
-                };
-                app.command_echo = Some(if pg_multi {
-                    let first = split_console_statements(&sql_text).remove(0);
-                    sheet.command_last = first.clone();
-                    first
-                } else {
-                    sql_text.clone()
-                });
+                app.command_echo = Some(pg_multi_first.clone().unwrap_or_else(|| sql_text.clone()));
+                if let Some(first) = pg_multi_first {
+                    app.command_queue = pg_multi_rest;
+                    sheet.command_last = first;
+                }
             }
         }
     }
