@@ -1602,6 +1602,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 } else {
                     vec![cmd.clone()]
                 };
+                if statements.is_empty() {
+                    return Task::none();
+                }
                 let first = statements.remove(0);
                 sheet.command_last = first.clone();
                 sheet.command_entry_line = sheet.command_dialog.lines().count();
@@ -2765,7 +2768,24 @@ fn run_spike_with_sql(
             if sheet.kind == WindowKind::Command {
                 // Running from Правка: jump to Диалог where the result lands.
                 sheet.command_edit = false;
-                app.command_echo = Some(sql_text.clone());
+                // Postgres `a; b; c` pasted into the buffer: echo/run the
+                // first statement now, queue the rest (echo/answer per one).
+                let pg_multi = profile.db_kind == DbKind::Postgres && {
+                    let list = split_console_statements(&sql_text);
+                    if list.len() > 1 {
+                        app.command_queue = list[1..].to_vec();
+                        true
+                    } else {
+                        false
+                    }
+                };
+                app.command_echo = Some(if pg_multi {
+                    let first = split_console_statements(&sql_text).remove(0);
+                    sheet.command_last = first.clone();
+                    first
+                } else {
+                    sql_text.clone()
+                });
             }
         }
     }
@@ -6448,7 +6468,7 @@ mod tests {
 
 #[cfg(test)]
 mod console_queue_tests {
-    use super::split_console_statements;
+    use super::*;
 
     #[test]
     fn splits_on_terminators_and_skips_empty() {
@@ -6458,5 +6478,37 @@ mod console_queue_tests {
         );
         assert_eq!(split_console_statements("select 1"), vec!["select 1"]);
         assert!(split_console_statements("; ; ;").is_empty());
+    }
+
+    #[test]
+    fn multi_statement_submit_chains_next_echo() {
+        let mut app = App::new();
+        app.open_window(WindowKind::Command);
+        update(
+            &mut app,
+            Message::CommandInput("select 1 from dual; select 2 from dual;".to_string()),
+        );
+        update(&mut app, Message::CommandSubmit);
+        let run_id = app.spike_run;
+        update(
+            &mut app,
+            Message::SpikeFinished(
+                run_id,
+                Ok(SpikePayload {
+                    sql: "select 1 from dual".to_string(),
+                    output: "ok".to_string(),
+                    columns: vec!["1".to_string()],
+                    rows: vec![vec!["1".to_string()]],
+                    notices: Vec::new(),
+                }),
+            ),
+        );
+        // First result in the dialog AND the next statement already echoed
+        // and running (query -> answer -> query -> ...).
+        let sheet = &app.worksheets[app.active_tab];
+        assert!(sheet.command_dialog.contains("SQL> select 1 from dual"));
+        assert!(sheet.command_dialog.contains("SQL> select 2 from dual"));
+        assert_eq!(app.command_queue.len(), 0);
+        assert!(app.busy);
     }
 }
