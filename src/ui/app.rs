@@ -2145,7 +2145,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     }
                 }
                 Err(error) => {
+                    let mut command_run = false;
                     if let Some(echo) = app.command_echo.take() {
+                        // Command window: the error is already in the dialog —
+                        // no modal on top of it.
+                        command_run = true;
                         if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                             let entry = if echo.is_empty() {
                                 format!("{error}\n\n")
@@ -2163,7 +2167,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                             }
                         }
                     }
-                    show_error_modal(app, error);
+                    if !command_run {
+                        show_error_modal(app, error);
+                    }
                     app.metrics = i18n::t("status.execute_failed");
                 }
             }
