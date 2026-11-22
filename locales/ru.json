@@ -369,5 +369,16 @@
         "command.not_connected": "Не подключено",
         "dialog.copy": "Копировать"
     },
-    "status.copied": "Скопировано в буфер"
+    "status.copied": "Скопировано в буфер",
+    "prefs.page.update": "Обновление",
+    "prefs.update.url": "Источник обновлений (GitHub-репозиторий)",
+    "prefs.update.current": "Текущая версия: {version}",
+    "update.title": "Доступно обновление",
+    "update.available": "Новая версия {version} (установлена {current}). Обновить автоматически?",
+    "update.install": "Обновить",
+    "update.later": "Позже",
+    "update.downloading": "Скачивание и установка обновления…",
+    "update.installed": "Обновление установлено. Перезапустить приложение?",
+    "update.restart": "Перезапустить",
+    "update.failed": "Не удалось обновиться: {error}"
 }

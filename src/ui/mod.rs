@@ -14,6 +14,7 @@ pub mod postgres_prefs;
 pub mod preferences;
 pub mod result_grid;
 pub mod theme;
+pub mod updater;
 pub mod window_kind;
 
 pub use app::run;

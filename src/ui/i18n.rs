@@ -89,16 +89,23 @@ struct LocaleFile {
 struct AppSettings {
     #[serde(default = "default_locale_code")]
     locale: String,
+    #[serde(default = "default_update_url")]
+    update_url: String,
 }
 
 fn default_locale_code() -> String {
     DEFAULT_LOCALE.to_string()
 }
 
+fn default_update_url() -> String {
+    crate::ui::updater::DEFAULT_UPDATE_URL.to_string()
+}
+
 /// In-memory localization state: available locales, active catalog, English fallback.
 struct I18n {
     locales_dir: PathBuf,
     settings_path: PathBuf,
+    update_url: String,
     available: Vec<LocaleInfo>,
     current_code: String,
     current: HashMap<String, String>,
@@ -110,6 +117,7 @@ impl I18n {
         Self {
             locales_dir: PathBuf::new(),
             settings_path: PathBuf::new(),
+            update_url: default_update_url(),
             available: Vec::new(),
             current_code: DEFAULT_LOCALE.to_string(),
             current: HashMap::new(),
@@ -131,6 +139,11 @@ impl I18n {
 
         let settings = load_settings(&settings_path);
         let available = scan_locales(&locales_dir);
+        let update_url = if settings.update_url.trim().is_empty() {
+            default_update_url()
+        } else {
+            settings.update_url
+        };
         let current_code = if available.iter().any(|l| l.code == settings.locale) {
             settings.locale
         } else {
@@ -142,6 +155,7 @@ impl I18n {
         Self {
             locales_dir,
             settings_path,
+            update_url,
             available,
             current_code,
             current,
@@ -181,6 +195,7 @@ impl I18n {
     fn save_settings(&self) {
         let settings = AppSettings {
             locale: self.current_code.clone(),
+            update_url: self.update_url.clone(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&settings) {
             let _ = fs::write(&self.settings_path, json);
@@ -370,6 +385,18 @@ pub fn reload_available() {
 }
 
 /// Switch active catalog. Returns `false` if the locale file is missing/invalid.
+/// Update source repo configured in Preferences (survives repo moves).
+pub fn update_url() -> String {
+    I18N.read().expect("i18n lock").update_url.clone()
+}
+
+/// Persists the update source to `settings.json`.
+pub fn set_update_url(url: String) {
+    let mut i18n = I18N.write().expect("i18n lock");
+    i18n.update_url = url.trim().trim_end_matches('/').to_string();
+    i18n.save_settings();
+}
+
 pub fn set_locale(code: &str) -> bool {
     let ok = I18N.write().expect("i18n lock").set_locale(code);
     if ok {

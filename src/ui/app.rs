@@ -88,20 +88,37 @@ use crate::ui::window_kind::WindowKind;
 /// Runs the iced IDE window.
 pub fn run() -> iced::Result {
     i18n::init();
-    iced::application(App::new, update, view)
-        .title("PLSQL IDE")
-        .theme(|app: &App| {
-            if ui_theme::Palette::resolve(app.theme_mode).is_dark {
-                Theme::Dark
-            } else {
-                Theme::Light
-            }
-        })
-        .subscription(|app| subscription(app))
-        .font(LUCIDE_FONT_BYTES)
-        .centered()
-        .window_size((1400.0, 900.0))
-        .run()
+    iced::application(
+        || {
+            let app = App::new();
+            // One silent update check per launch (offline → stays quiet).
+            let url = i18n::update_url();
+            let task = Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || crate::ui::updater::check(&url))
+                        .await
+                        .unwrap_or(None)
+                },
+                Message::UpdateChecked,
+            );
+            (app, task)
+        },
+        update,
+        view,
+    )
+    .title("PLSQL IDE")
+    .theme(|app: &App| {
+        if ui_theme::Palette::resolve(app.theme_mode).is_dark {
+            Theme::Dark
+        } else {
+            Theme::Light
+        }
+    })
+    .subscription(|app| subscription(app))
+    .font(LUCIDE_FONT_BYTES)
+    .centered()
+    .window_size((1400.0, 900.0))
+    .run()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -399,6 +416,8 @@ struct App {
     connect_error_content: text_editor::Content,
     /// SQL execution error shown in a modal (with caret jump on close).
     error_modal: Option<String>,
+    /// Auto-update dialog (offer / progress / result).
+    update_modal: Option<UpdateModal>,
     /// Selectable error text (rebuilt when a modal opens).
     error_modal_content: text_editor::Content,
     /// Cmd+A pressed in a command window: the whole dialog is highlighted
@@ -484,8 +503,28 @@ struct App {
     thumb_drag: bool,
 }
 
+/// Auto-update modal phases: offer → installing → installed/failed.
+#[derive(Debug, Clone)]
+enum UpdateModal {
+    Offer(crate::ui::updater::UpdateOffer),
+    Installing,
+    Installed,
+    Failed(String),
+}
+
 #[derive(Debug, Clone)]
 enum Message {
+    /// Startup update check finished (`None` = up to date or offline).
+    UpdateChecked(Option<crate::ui::updater::UpdateOffer>),
+    /// User agreed to install the offered update.
+    UpdateInstall,
+    /// Download + self-replace finished.
+    UpdateInstallDone(Result<(), String>),
+    /// Relaunch the freshly installed binary.
+    UpdateRestart,
+    /// Close the update modal (later).
+    UpdateDismiss,
+
     EditorAction(Action),
     /// Vertical scrollbar thumb pressed (drag starts).
     EditorThumbPress,
@@ -649,6 +688,7 @@ impl App {
             connect_error: None,
             connect_error_content: text_editor::Content::new(),
             error_modal: None,
+            update_modal: None,
             error_modal_content: text_editor::Content::new(),
             command_all_selected: false,
             dialog: None,
@@ -2020,6 +2060,44 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.dialog_error = None;
             Task::none()
         }
+        Message::UpdateChecked(offer) => {
+            if let Some(offer) = offer {
+                if app.update_modal.is_none() {
+                    app.update_modal = Some(UpdateModal::Offer(offer));
+                }
+            }
+            Task::none()
+        }
+        Message::UpdateInstall => {
+            let Some(UpdateModal::Offer(offer)) = app.update_modal.take() else {
+                return Task::none();
+            };
+            app.update_modal = Some(UpdateModal::Installing);
+            let install = move || crate::ui::updater::install(&offer);
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(install)
+                        .await
+                        .unwrap_or_else(|e| Err(format!("update task: {e}")))
+                },
+                Message::UpdateInstallDone,
+            )
+        }
+        Message::UpdateInstallDone(result) => {
+            app.update_modal = Some(match result {
+                Ok(()) => UpdateModal::Installed,
+                Err(error) => UpdateModal::Failed(error),
+            });
+            Task::none()
+        }
+        Message::UpdateRestart => {
+            crate::ui::updater::restart();
+            Task::none()
+        }
+        Message::UpdateDismiss => {
+            app.update_modal = None;
+            Task::none()
+        }
         Message::OpenPreferences => {
             app.preferences = Some(PreferencesState::new());
             Task::none()
@@ -3185,6 +3263,11 @@ fn view_inner(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .height(Fill)
             .into()
+    } else if let Some(modal) = &app.update_modal {
+        stack![base, update_modal(modal)]
+            .width(Fill)
+            .height(Fill)
+            .into()
     } else if let Some(state) = &app.preferences {
         stack![base, preferences_modal(state).map(Message::Preferences)]
             .width(Fill)
@@ -4181,6 +4264,101 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
             .style(|_| ui_theme::modal_backdrop()),
     )
     .on_press(Message::DismissConnectError);
+
+    opaque(
+        stack![
+            backdrop,
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
+        ]
+        .width(Fill)
+        .height(Fill),
+    )
+}
+
+/// Auto-update dialog: new version found / progress / restart prompt / failure.
+fn update_modal(state: &UpdateModal) -> Element<'_, Message> {
+    let title = text(i18n::t("update.title")).size(18);
+    let mut form = column![title].spacing(12);
+
+    match state {
+        UpdateModal::Offer(offer) => {
+            form = form.push(
+                text(i18n::t_args(
+                    "update.available",
+                    &[
+                        ("version", offer.version.as_str()),
+                        ("current", env!("CARGO_PKG_VERSION")),
+                    ],
+                ))
+                .size(13),
+            );
+            form = form.push(
+                row![
+                    Space::new().width(Fill),
+                    button(text(i18n::t("update.later")).size(13))
+                        .padding(Padding::from([8, 16]))
+                        .style(|_, status| ui_theme::chrome_button(status))
+                        .on_press(Message::UpdateDismiss),
+                    button(text(i18n::t("update.install")).size(13))
+                        .padding(Padding::from([8, 16]))
+                        .style(|_, status| ui_theme::primary_button(status))
+                        .on_press(Message::UpdateInstall),
+                ]
+                .spacing(8),
+            );
+        }
+        UpdateModal::Installing => {
+            form = form.push(
+                text(i18n::t("update.downloading"))
+                    .size(13)
+                    .color(ui_theme::current().muted),
+            );
+        }
+        UpdateModal::Installed => {
+            form = form.push(text(i18n::t("update.installed")).size(13));
+            form = form.push(
+                row![
+                    Space::new().width(Fill),
+                    button(text(i18n::t("update.later")).size(13))
+                        .padding(Padding::from([8, 16]))
+                        .style(|_, status| ui_theme::chrome_button(status))
+                        .on_press(Message::UpdateDismiss),
+                    button(text(i18n::t("update.restart")).size(13))
+                        .padding(Padding::from([8, 16]))
+                        .style(|_, status| ui_theme::primary_button(status))
+                        .on_press(Message::UpdateRestart),
+                ]
+                .spacing(8),
+            );
+        }
+        UpdateModal::Failed(error) => {
+            form = form
+                .push(text(i18n::t_args("update.failed", &[("error", error.as_str())])).size(13));
+            form = form.push(row![
+                Space::new().width(Fill),
+                button(text(i18n::t("dialog.connect_failed.ok")).size(13))
+                    .padding(Padding::from([8, 16]))
+                    .style(|_, status| ui_theme::primary_button(status))
+                    .on_press(Message::UpdateDismiss),
+            ]);
+        }
+    }
+
+    let form = form.padding(20).width(460);
+    let card = container(form).style(|_| ui_theme::modal_card());
+    let backdrop = mouse_area(
+        container(Space::new().width(Fill).height(Fill))
+            .width(Fill)
+            .height(Fill)
+            .style(|_| ui_theme::modal_backdrop()),
+    )
+    .on_press(Message::UpdateDismiss);
 
     opaque(
         stack![

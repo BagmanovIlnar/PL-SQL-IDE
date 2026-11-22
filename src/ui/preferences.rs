@@ -8,7 +8,7 @@ use iced::alignment::{Horizontal, Vertical};
 use iced::border::Border;
 use iced::widget::{
     button, column, container, mouse_area, opaque, pick_list, row, rule, scrollable, stack, text,
-    Space,
+    text_input, Space,
 };
 use iced::{Background, Color, Element, Fill, Padding};
 
@@ -67,7 +67,7 @@ impl PreferencesSection {
     /// Leaf pages under this section, in menu order.
     pub fn pages(self) -> &'static [PreferencesPage] {
         match self {
-            Self::UserInterface => &[PreferencesPage::UiAppearance],
+            Self::UserInterface => &[PreferencesPage::UiAppearance, PreferencesPage::UiUpdate],
             Self::Postgres => &[PreferencesPage::PostgresConnection],
             Self::Oracle => &[
                 PreferencesPage::OracleConnection,
@@ -105,6 +105,7 @@ impl PreferencesSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreferencesPage {
     UiAppearance,
+    UiUpdate,
     PostgresConnection,
     OracleConnection,
     OracleOptions,
@@ -121,6 +122,7 @@ impl PreferencesPage {
     pub fn key(self) -> &'static str {
         match self {
             Self::UiAppearance => "prefs.page.appearance",
+            Self::UiUpdate => "prefs.page.update",
             Self::PostgresConnection => "prefs.page.connection",
             Self::OracleConnection => "prefs.page.connection",
             Self::OracleOptions => "prefs.page.options",
@@ -141,7 +143,7 @@ impl PreferencesPage {
     /// Parent section for this page.
     pub fn section(self) -> PreferencesSection {
         match self {
-            Self::UiAppearance => PreferencesSection::UserInterface,
+            Self::UiAppearance | Self::UiUpdate => PreferencesSection::UserInterface,
             Self::PostgresConnection => PreferencesSection::Postgres,
             Self::OracleConnection
             | Self::OracleOptions
@@ -176,6 +178,8 @@ pub struct PreferencesState {
     pub language: LocaleInfo,
     /// Locales discovered on disk when the dialog opened.
     pub available: Vec<LocaleInfo>,
+    /// Draft update source URL (saved on OK).
+    pub update_url: String,
     /// Draft Oracle → Connection form (saved on OK).
     pub oracle_connection: OracleConnectionForm,
     /// Draft PostgreSQL → Connection form (saved on OK).
@@ -208,6 +212,7 @@ impl PreferencesState {
             selected: PreferencesPage::UiAppearance,
             language,
             available,
+            update_url: i18n::update_url(),
             oracle_connection: OracleConnectionForm::load(),
             postgres_connection: PostgresConnectionForm::load(),
             oracle_options: OracleOptionsForm::load(),
@@ -259,6 +264,8 @@ pub enum PreferencesMessage {
     ToggleSection(PreferencesSection),
     /// Appearance → Language combo changed.
     LanguageChanged(LocaleInfo),
+    /// Update → source URL field changed.
+    UpdateUrlChanged(String),
     /// Oracle → Connection page controls.
     OracleConnection(OracleConnectionMessage),
     /// PostgreSQL → Connection page controls.
@@ -296,6 +303,10 @@ impl PreferencesState {
                 self.language = language;
                 false
             }
+            PreferencesMessage::UpdateUrlChanged(url) => {
+                self.update_url = url;
+                false
+            }
             PreferencesMessage::OracleConnection(message) => {
                 self.oracle_connection.update(message);
                 false
@@ -320,6 +331,7 @@ impl PreferencesState {
             PreferencesMessage::Close => true,
             PreferencesMessage::Ok => {
                 let _ = i18n::set_locale(&self.language.code);
+                i18n::set_update_url(self.update_url.clone());
                 self.oracle_connection.save();
                 self.postgres_connection.save();
                 self.oracle_options.save();
@@ -335,6 +347,7 @@ impl PreferencesState {
 fn preferences_page(state: &PreferencesState) -> Element<'_, PreferencesMessage> {
     match state.selected {
         PreferencesPage::UiAppearance => appearance_page(state),
+        PreferencesPage::UiUpdate => update_page(state),
         PreferencesPage::PostgresConnection => postgres_connection_page(&state.postgres_connection)
             .map(PreferencesMessage::PostgresConnection),
         PreferencesPage::OracleConnection => oracle_connection_page(&state.oracle_connection)
@@ -386,6 +399,31 @@ fn appearance_page(state: &PreferencesState) -> Element<'_, PreferencesMessage> 
         text(i18n::t_args(
             "prefs.locales_hint",
             &[("path", &locales_path)],
+        ))
+        .size(11)
+        .color(ui_theme::current().muted),
+    ]
+    .spacing(4)
+    .width(Fill)
+    .height(Fill)
+    .into()
+}
+
+/// Update page: source repo URL (default = this project's GitHub) + current version.
+fn update_page(state: &PreferencesState) -> Element<'_, PreferencesMessage> {
+    column![
+        text(i18n::t("prefs.page.update")).size(13),
+        text(i18n::t("prefs.update.url"))
+            .size(11)
+            .color(ui_theme::current().muted),
+        text_input("", &state.update_url)
+            .on_input(PreferencesMessage::UpdateUrlChanged)
+            .padding(3)
+            .size(12)
+            .width(420),
+        text(i18n::t_args(
+            "prefs.update.current",
+            &[("version", env!("CARGO_PKG_VERSION"))],
         ))
         .size(11)
         .color(ui_theme::current().muted),
