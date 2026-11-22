@@ -1209,7 +1209,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
         Message::ErrorEditorAction(action) => {
-            tracing::debug!(target: "command", ?action, "error modal editor action");
+            // iced publishes editor actions; applying them to the content is
+            // the app's job — selection never moves without this.
+            tracing::info!(target: "command", ?action, "error modal editor action");
+            app.error_modal_content.perform(action.clone());
+            app.connect_error_content.perform(action);
             Task::none()
         }
         Message::CommandSelectAll => {
