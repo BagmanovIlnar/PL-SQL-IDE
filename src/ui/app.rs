@@ -395,6 +395,8 @@ struct App {
     connection_status: HashMap<ConnectionId, ConnectionStatus>,
     /// Error text for the Connect failure modal (shown when set).
     connect_error: Option<String>,
+    /// Selectable connect-error text (rebuilt when the modal opens).
+    connect_error_content: text_editor::Content,
     /// SQL execution error shown in a modal (with caret jump on close).
     error_modal: Option<String>,
     /// Selectable error text (rebuilt when a modal opens).
@@ -642,6 +644,7 @@ impl App {
             selected_connection,
             connection_status: HashMap::new(),
             connect_error: None,
+            connect_error_content: text_editor::Content::new(),
             error_modal: None,
             error_modal_content: text_editor::Content::new(),
             command_all_selected: false,
@@ -1205,7 +1208,10 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
-        Message::ErrorEditorAction(_) => Task::none(),
+        Message::ErrorEditorAction(action) => {
+            tracing::debug!(target: "command", ?action, "error modal editor action");
+            Task::none()
+        }
         Message::CommandSelectAll => {
             let console_active = app
                 .worksheets
@@ -1874,6 +1880,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 }
                 Err(error) => {
                     app.connection_status.insert(id, ConnectionStatus::Failed);
+                    app.connect_error_content = text_editor::Content::with_text(&error);
                     app.connect_error = Some(error);
                     app.metrics = i18n::t("status.connect_failed");
                     if app.objects_connection == Some(id) {
@@ -2484,7 +2491,9 @@ fn run_connect(app: &mut App) -> Task<Message> {
                 app.busy = false;
                 app.connecting = None;
                 app.connection_status.insert(id, ConnectionStatus::Failed);
-                app.connect_error = Some(i18n::t("status.oracle_disabled"));
+                let message = i18n::t("status.oracle_disabled");
+                app.connect_error_content = text_editor::Content::with_text(&message);
+                app.connect_error = Some(message);
                 app.metrics = i18n::t("status.connect_failed");
                 Task::none()
             }
@@ -4060,15 +4069,16 @@ fn connect_error_modal(app: &App) -> Element<'_, Message> {
         text(i18n::t("dialog.connect_failed.title"))
             .size(18)
             .color(ui_theme::error()),
-        console_text_view(app.connect_error.clone().unwrap_or_default(), 200.0, 520.0),
+        // Selectable monospace text: click, drag, Cmd+A/Cmd+C work natively.
+        text_editor(&app.connect_error_content)
+            .height(200)
+            .width(420)
+            .size(13)
+            .font(Font::MONOSPACE)
+            .wrapping(iced::widget::text::Wrapping::Word)
+            .on_action(Message::ErrorEditorAction),
         row![
             Space::new().width(Fill),
-            button(text(i18n::t("dialog.copy")).size(13))
-                .padding(Padding::from([8, 16]))
-                .style(|_, status| ui_theme::chrome_button(status))
-                .on_press(Message::CopyError(
-                    app.connect_error.clone().unwrap_or_default()
-                )),
             button(text(i18n::t("dialog.connect_failed.ok")).size(13))
                 .padding(Padding::from([8, 16]))
                 .style(|_, status| ui_theme::primary_button(status))
