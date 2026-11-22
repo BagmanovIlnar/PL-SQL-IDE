@@ -740,6 +740,17 @@ impl App {
         }
     }
 
+    /// After switching the selected connection, show its first tab; with no
+    /// tabs yet, `active_tab` points past the end (empty workspace).
+    fn focus_connection_tabs(&mut self, id: ConnectionId) {
+        self.active_tab = self
+            .worksheets
+            .iter()
+            .position(|s| s.connection_id == Some(id))
+            .unwrap_or(self.worksheets.len());
+        self.completion.clear();
+    }
+
     fn open_window(&mut self, kind: WindowKind) -> Task<Message> {
         let connection_id = self.selected_connection;
         let connection_label = connection_id
@@ -1652,6 +1663,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.selected_connection = Some(id);
             app.selected_group = None;
             app.persist_connections();
+            app.focus_connection_tabs(id);
             if let Some(profile) = app.selected_profile() {
                 app.metrics = i18n::t_args(
                     "status.selected_connection",
@@ -2046,6 +2058,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     app.dialog = None;
                     app.dialog_error = None;
                     app.persist_connections();
+                    app.focus_connection_tabs(id);
                 }
                 Err(error) => {
                     app.dialog_error = Some(error);
@@ -4642,6 +4655,11 @@ fn worksheet_tabs(app: &App) -> Element<'_, Message> {
     let mut tabs = row![].spacing(4).align_y(Vertical::Center);
 
     for (index, sheet) in app.worksheets.iter().enumerate() {
+        // Tabs are grouped by connection: only the tabs created under the
+        // connection currently selected in the connection field are shown.
+        if sheet.connection_id != app.selected_connection {
+            continue;
+        }
         let active = index == app.active_tab;
         let title = sheet.tab_label();
         let tab = button(text(title).size(12))
@@ -6489,6 +6507,15 @@ mod console_queue_tests {
     #[test]
     fn multi_statement_submit_chains_next_echo() {
         let mut app = App::new();
+        // Pin a Postgres connection: the store's real selection must not
+        // decide whether the console splits on ';'.
+        let pg = crate::core::connection_profile::ConnectionProfile::new(
+            "pg-test",
+            crate::core::db_kind::DbKind::Postgres,
+        );
+        app.connections.push(pg);
+        let id = app.connections.last().unwrap().id;
+        app.selected_connection = Some(id);
         app.open_window(WindowKind::Command);
         update(
             &mut app,
