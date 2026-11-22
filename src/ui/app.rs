@@ -459,6 +459,9 @@ struct App {
     sidebar_visible: bool,
     /// Command text of the in-flight Command-window run (dialog echo).
     command_echo: Option<String>,
+    /// Remaining statements of a multi-statement console submit (`a; b; c`)
+    /// — executed one by one, echo/answer per statement.
+    command_queue: Vec<String>,
     /// Height of the parameters panel under the editor (user-resizable).
     parameters_height: f32,
     /// Active panel-border drag, if any.
@@ -676,6 +679,7 @@ impl App {
             sidebar_width: SIDEBAR_WIDTH_DEFAULT,
             sidebar_visible: true,
             command_echo: None,
+            command_queue: Vec::new(),
             parameters_height: PANEL_HEIGHT,
             resize_drag: None,
             debug_session: DebugSession::default(),
@@ -1564,6 +1568,10 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             tracing::info!(target: "command", "submit: Enter fired on SQL> line");
             let cmd = {
                 let banner = command_banner(app);
+                let pg = app
+                    .active_worksheet_profile()
+                    .map(|p| p.db_kind == DbKind::Postgres)
+                    .unwrap_or(false);
                 let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
                     return Task::none();
                 };
@@ -1586,11 +1594,21 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 if sheet.command_dialog.is_empty() {
                     dialog_push(sheet, &banner);
                 }
-                // Echo exactly what was typed ("/" stays "/"), run the resolved command.
+                // Postgres console: `a; b; c` runs sequentially — echo and
+                // answer per statement. ponytail: naive `;` split, a literal
+                // 'a;b' will over-split; add a quote-aware scanner when it bites.
+                let mut statements = if pg {
+                    split_console_statements(&cmd)
+                } else {
+                    vec![cmd.clone()]
+                };
+                let first = statements.remove(0);
+                sheet.command_last = first.clone();
                 sheet.command_entry_line = sheet.command_dialog.lines().count();
-                let display = console_expand_tabs(&raw);
+                let display = console_expand_tabs(&first);
                 dialog_push(sheet, &format!("SQL> {display}\n"));
-                cmd
+                app.command_queue = statements;
+                first
             };
             // Echo is already in the dialog — only the output comes later.
             app.command_echo = Some(String::new());
@@ -1610,7 +1628,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             let Some(sheet) = app.worksheets.get_mut(app.active_tab) else {
                 return Task::none();
             };
-            if sheet.kind != WindowKind::Command || !app.busy {
+            if sheet.kind != WindowKind::Command || (!app.busy && !sheet.command_paused) {
                 return Task::none();
             }
             if sheet.command_paused {
@@ -1618,6 +1636,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 let pending = std::mem::take(&mut sheet.command_pending);
                 dialog_push(sheet, &pending);
                 app.metrics = i18n::t("status.resumed");
+                if !app.command_queue.is_empty() {
+                    return console_run_next(app);
+                }
             } else {
                 sheet.command_paused = true;
                 app.metrics = i18n::t("status.paused");
@@ -2057,6 +2078,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             }
             app.busy = false;
             let mut console_appended = false;
+            let mut command_run = false;
             match outcome {
                 Ok(payload) => {
                     tracing::info!(
@@ -2067,6 +2089,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     let output = payload.output.clone();
                     app.last_output = payload.output;
                     if let Some(echo) = app.command_echo.take() {
+                        command_run = true;
                         if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
                             // SQL*Plus-style output for the console: notices first
                             // (RAISE NOTICE / DBMS_OUTPUT analog), then the table.
@@ -2145,7 +2168,6 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     }
                 }
                 Err(error) => {
-                    let mut command_run = false;
                     if let Some(echo) = app.command_echo.take() {
                         // Command window: the error is already in the dialog —
                         // no modal on top of it.
@@ -2186,7 +2208,19 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     head = %dialog.lines().next().unwrap_or(""),
                     "dialog state after append"
                 );
-                Task::batch([console_scroll_to_entry(entry_line), focus_command_input()])
+                let chain = if command_run {
+                    console_run_next(app)
+                } else {
+                    Task::none()
+                };
+                Task::batch([
+                    console_scroll_to_entry(entry_line),
+                    focus_command_input(),
+                    chain,
+                ])
+            } else if command_run {
+                // Paused mid-sequence: result went to pending, queue waits.
+                console_run_next(app)
             } else {
                 Task::none()
             }
@@ -5369,6 +5403,43 @@ fn dialog_push(sheet: &mut Worksheet, value: &str) {
 /// a plain SQL statement is client-side — neither reaches the server.
 /// PL/SQL blocks (declare/begin/create/with…) keep their semicolons.
 // ponytail: block detection by first keyword only; multi-`/` scripts out of scope.
+/// Splits a console submit on `;` terminators for sequential execution.
+fn split_console_statements(text: &str) -> Vec<String> {
+    text.split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Runs the next queued console statement, echoing it first (query → answer
+/// → query → answer). Paused → the queue waits for resume.
+fn console_run_next(app: &mut App) -> Task<Message> {
+    let Some(stmt) = app.command_queue.first().cloned() else {
+        return Task::none();
+    };
+    if app
+        .worksheets
+        .get(app.active_tab)
+        .is_some_and(|sheet| sheet.command_paused)
+    {
+        return Task::none();
+    }
+    app.command_queue.remove(0);
+    let banner = command_banner(app);
+    if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+        if sheet.command_dialog.is_empty() {
+            dialog_push(sheet, &banner);
+        }
+        sheet.command_last = stmt.clone();
+        sheet.command_entry_line = sheet.command_dialog.lines().count();
+        let display = console_expand_tabs(&stmt);
+        dialog_push(sheet, &format!("SQL> {display}\n"));
+    }
+    app.command_echo = Some(String::new());
+    run_spike_with_sql(app, FetchMode::Execute, Some(stmt))
+}
+
 fn strip_sqlplus_terminators(text: &str) -> String {
     let mut lines: Vec<&str> = text.lines().collect();
     while matches!(lines.last().map(|l: &&str| l.trim()), Some("/") | Some("")) {
@@ -6369,5 +6440,20 @@ mod tests {
             ),
             "SELECT * FROM (select 1 from dual) OFFSET 0 ROWS FETCH FIRST 10 ROWS ONLY"
         );
+    }
+}
+
+#[cfg(test)]
+mod console_queue_tests {
+    use super::split_console_statements;
+
+    #[test]
+    fn splits_on_terminators_and_skips_empty() {
+        assert_eq!(
+            split_console_statements("select 1;\nselect 2;\n"),
+            vec!["select 1", "select 2"]
+        );
+        assert_eq!(split_console_statements("select 1"), vec!["select 1"]);
+        assert!(split_console_statements("; ; ;").is_empty());
     }
 }
