@@ -379,6 +379,10 @@
         "update.downloading": "Скачивание и установка обновления…",
         "update.installed": "Обновление установлено. Перезапустить приложение?",
         "update.restart": "Перезапустить",
-        "update.failed": "Не удалось обновиться: {error}"
+        "update.failed": "Не удалось обновиться: {error}",
+        "help.about": "О программе",
+        "about.title": "О программе",
+        "about.version": "Версия: {version}",
+        "about.source": "PLSQL IDE — Oracle PL/SQL и PostgreSQL"
     }
 }

@@ -418,6 +418,8 @@ struct App {
     error_modal: Option<String>,
     /// Auto-update dialog (offer / progress / result).
     update_modal: Option<UpdateModal>,
+    /// About dialog open (Help ribbon).
+    about: bool,
     /// Selectable error text (rebuilt when a modal opens).
     error_modal_content: text_editor::Content,
     /// Cmd+A pressed in a command window: the whole dialog is highlighted
@@ -524,6 +526,10 @@ enum Message {
     UpdateRestart,
     /// Close the update modal (later).
     UpdateDismiss,
+    /// Show the About dialog (Help ribbon).
+    ShowAbout,
+    /// Close the About dialog.
+    DismissAbout,
 
     EditorAction(Action),
     /// Vertical scrollbar thumb pressed (drag starts).
@@ -689,6 +695,7 @@ impl App {
             connect_error_content: text_editor::Content::new(),
             error_modal: None,
             update_modal: None,
+            about: false,
             error_modal_content: text_editor::Content::new(),
             command_all_selected: false,
             dialog: None,
@@ -2098,6 +2105,14 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.update_modal = None;
             Task::none()
         }
+        Message::ShowAbout => {
+            app.about = true;
+            Task::none()
+        }
+        Message::DismissAbout => {
+            app.about = false;
+            Task::none()
+        }
         Message::OpenPreferences => {
             app.preferences = Some(PreferencesState::new());
             Task::none()
@@ -3268,6 +3283,8 @@ fn view_inner(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .height(Fill)
             .into()
+    } else if app.about {
+        stack![base, about_modal()].width(Fill).height(Fill).into()
     } else if let Some(state) = &app.preferences {
         stack![base, preferences_modal(state).map(Message::Preferences)]
             .width(Fill)
@@ -3634,9 +3651,10 @@ fn ribbon(app: &App) -> Element<'_, Message> {
             .into()
         }
         RibbonTab::Help => container(
-            text(i18n::t("help.placeholder"))
-                .size(12)
-                .color(ui_theme::current().muted),
+            button(text(i18n::t("help.about")).size(12))
+                .padding(Padding::from([6, 14]))
+                .style(|_, status| ui_theme::chrome_button(status))
+                .on_press(Message::ShowAbout),
         )
         .padding(Padding::from([6, 10]))
         .into(),
@@ -4359,6 +4377,55 @@ fn update_modal(state: &UpdateModal) -> Element<'_, Message> {
             .style(|_| ui_theme::modal_backdrop()),
     )
     .on_press(Message::UpdateDismiss);
+
+    opaque(
+        stack![
+            backdrop,
+            opaque(
+                container(card)
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+            ),
+        ]
+        .width(Fill)
+        .height(Fill),
+    )
+}
+
+/// About dialog: current version baked in at compile time.
+fn about_modal() -> Element<'static, Message> {
+    let form = column![
+        text(i18n::t("about.title")).size(18),
+        text(i18n::t_args(
+            "about.version",
+            &[("version", env!("CARGO_PKG_VERSION"))],
+        ))
+        .size(13),
+        text(i18n::t("about.source"))
+            .size(12)
+            .color(ui_theme::current().muted),
+        row![
+            Space::new().width(Fill),
+            button(text(i18n::t("dialog.common.ok")).size(13))
+                .padding(Padding::from([8, 16]))
+                .style(|_, status| ui_theme::primary_button(status))
+                .on_press(Message::DismissAbout),
+        ],
+    ]
+    .spacing(12)
+    .padding(20)
+    .width(420);
+
+    let card = container(form).style(|_| ui_theme::modal_card());
+    let backdrop = mouse_area(
+        container(Space::new().width(Fill).height(Fill))
+            .width(Fill)
+            .height(Fill)
+            .style(|_| ui_theme::modal_backdrop()),
+    )
+    .on_press(Message::DismissAbout);
 
     opaque(
         stack![

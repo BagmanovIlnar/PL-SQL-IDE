@@ -379,6 +379,10 @@
         "update.downloading": "Downloading and installing update…",
         "update.installed": "Update installed. Restart the application?",
         "update.restart": "Restart",
-        "update.failed": "Update failed: {error}"
+        "update.failed": "Update failed: {error}",
+        "help.about": "About",
+        "about.title": "About",
+        "about.version": "Version: {version}",
+        "about.source": "PLSQL IDE — Oracle PL/SQL and PostgreSQL"
     }
 }
