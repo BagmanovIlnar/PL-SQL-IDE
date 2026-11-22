@@ -397,6 +397,8 @@ struct App {
     connect_error: Option<String>,
     /// SQL execution error shown in a modal (with caret jump on close).
     error_modal: Option<String>,
+    /// Selectable error text (rebuilt when a modal opens).
+    error_modal_content: text_editor::Content,
     /// Cmd+A pressed in a command window: the whole dialog is highlighted
     /// until copied (Cmd+C) or typing resets it.
     command_all_selected: bool,
@@ -488,6 +490,8 @@ enum Message {
     EditorThumbRelease,
     /// Copy a modal's error text to the clipboard.
     CopyError(String),
+    /// No-op sink for the error-modal editor's actions (selection only).
+    ErrorEditorAction(text_editor::Action),
     /// Cmd+A in a command window: highlight the whole console dialog.
     CommandSelectAll,
     /// Cmd+C in a command window: copy the whole console dialog.
@@ -639,6 +643,7 @@ impl App {
             connection_status: HashMap::new(),
             connect_error: None,
             error_modal: None,
+            error_modal_content: text_editor::Content::new(),
             command_all_selected: false,
             dialog: None,
             dialog_error: None,
@@ -1200,6 +1205,7 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::CopyError(value) => iced::clipboard::write(value),
+        Message::ErrorEditorAction(_) => Task::none(),
         Message::CommandSelectAll => {
             let console_active = app
                 .worksheets
@@ -2625,7 +2631,8 @@ fn auto_fill_bind_params(app: &mut App, text: &str) -> Vec<crate::ui::parameters
 
 /// Shows the SQL error modal and keeps a selectable editor copy of the text.
 fn show_error_modal(app: &mut App, text: String) {
-    app.error_modal = Some(text);
+    app.error_modal = Some(text.clone());
+    app.error_modal_content = text_editor::Content::with_text(&text);
 }
 
 fn page_select(sql: &str, kind: DbKind, offset: usize, limit: Option<usize>) -> String {
@@ -4105,17 +4112,17 @@ fn error_modal(app: &App) -> Element<'_, Message> {
         text(i18n::t("dialog.sql_error.title"))
             .size(18)
             .color(ui_theme::error()),
-        // Long ORA- stacks: monospace console text, both-axis scrollbars,
-        // copy via the button below (text_editor had no scrollbar).
-        console_text_view(app.error_modal.clone().unwrap_or_default(), 260.0, 520.0),
+        // Selectable monospace text: click, drag, Cmd+A/Cmd+C work natively.
+        // ponytail: edits mutate a throwaway copy, discarded on close.
+        text_editor(&app.error_modal_content)
+            .height(260)
+            .width(520)
+            .size(13)
+            .font(Font::MONOSPACE)
+            .wrapping(iced::widget::text::Wrapping::Word)
+            .on_action(Message::ErrorEditorAction),
         row![
             Space::new().width(Fill),
-            button(text(i18n::t("dialog.copy")).size(13))
-                .padding(Padding::from([8, 16]))
-                .style(|_, status| ui_theme::chrome_button(status))
-                .on_press(Message::CopyError(
-                    app.error_modal.clone().unwrap_or_default()
-                )),
             button(text(i18n::t("dialog.connect_failed.ok")).size(13))
                 .padding(Padding::from([8, 16]))
                 .style(|_, status| ui_theme::primary_button(status))
