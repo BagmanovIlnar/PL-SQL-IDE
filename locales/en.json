@@ -367,18 +367,18 @@
         "command.edit": "Edit",
         "command.dialog_empty": "No commands yet",
         "command.not_connected": "Not connected",
-        "dialog.copy": "Copy"
-    },
-    "status.copied": "Copied to clipboard",
-    "prefs.page.update": "Update",
-    "prefs.update.url": "Update source (GitHub repository)",
-    "prefs.update.current": "Current version: {version}",
-    "update.title": "Update available",
-    "update.available": "New version {version} available (installed {current}). Update automatically?",
-    "update.install": "Update",
-    "update.later": "Later",
-    "update.downloading": "Downloading and installing update…",
-    "update.installed": "Update installed. Restart the application?",
-    "update.restart": "Restart",
-    "update.failed": "Update failed: {error}"
+        "dialog.copy": "Copy",
+        "status.copied": "Copied to clipboard",
+        "prefs.page.update": "Update",
+        "prefs.update.url": "Update source (GitHub repository)",
+        "prefs.update.current": "Current version: {version}",
+        "update.title": "Update available",
+        "update.available": "New version {version} available (installed {current}). Update automatically?",
+        "update.install": "Update",
+        "update.later": "Later",
+        "update.downloading": "Downloading and installing update…",
+        "update.installed": "Update installed. Restart the application?",
+        "update.restart": "Restart",
+        "update.failed": "Update failed: {error}"
+    }
 }
