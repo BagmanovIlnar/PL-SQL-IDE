@@ -102,6 +102,7 @@ END;"#
             timeout_ms: Some(8_000),
             cancel: false,
             max_rows: None,
+            dbms_output: None,
         },
     )
     .await;
@@ -128,6 +129,7 @@ END;"#
             timeout_ms: Some(8_000),
             cancel: false,
             max_rows: None,
+            dbms_output: None,
         },
     )
     .await;
@@ -149,6 +151,7 @@ END;"#
             timeout_ms: Some(8_000),
             cancel: false,
             max_rows: None,
+            dbms_output: None,
         },
     )
     .await;
@@ -170,6 +173,7 @@ END;"#
             timeout_ms: Some(8_000),
             cancel: false,
             max_rows: None,
+            dbms_output: None,
         },
     )
     .await;

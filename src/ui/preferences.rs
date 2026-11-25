@@ -17,11 +17,13 @@ use crate::ui::oracle_compiler::{
     oracle_compiler_editor_modal, oracle_compiler_page, OracleCompilerForm, OracleCompilerMessage,
 };
 use crate::ui::oracle_debugger::{oracle_debugger_page, OracleDebuggerForm, OracleDebuggerMessage};
+use crate::ui::oracle_nls::{oracle_nls_page, OracleNlsForm, OracleNlsMessage};
 use crate::ui::oracle_options::{oracle_options_page, OracleOptionsForm, OracleOptionsMessage};
 use crate::ui::oracle_prefs::{
     oracle_connection_page, OracleConnectionForm, OracleConnectionMessage,
 };
 use crate::ui::oracle_wizard::oracle_wizard_modal;
+use crate::ui::postgres_format::{postgres_format_page, PostgresFormatForm, PostgresFormatMessage};
 use crate::ui::postgres_prefs::{
     postgres_connection_page, PostgresConnectionForm, PostgresConnectionMessage,
 };
@@ -68,10 +70,14 @@ impl PreferencesSection {
     pub fn pages(self) -> &'static [PreferencesPage] {
         match self {
             Self::UserInterface => &[PreferencesPage::UiAppearance, PreferencesPage::UiUpdate],
-            Self::Postgres => &[PreferencesPage::PostgresConnection],
+            Self::Postgres => &[
+                PreferencesPage::PostgresConnection,
+                PreferencesPage::PostgresFormats,
+            ],
             Self::Oracle => &[
                 PreferencesPage::OracleConnection,
                 PreferencesPage::OracleOptions,
+                PreferencesPage::OracleNls,
                 PreferencesPage::OracleCompiler,
                 PreferencesPage::OracleDebugger,
                 PreferencesPage::OracleOutput,
@@ -107,8 +113,10 @@ pub enum PreferencesPage {
     UiAppearance,
     UiUpdate,
     PostgresConnection,
+    PostgresFormats,
     OracleConnection,
     OracleOptions,
+    OracleNls,
     OracleCompiler,
     OracleDebugger,
     OracleOutput,
@@ -124,8 +132,10 @@ impl PreferencesPage {
             Self::UiAppearance => "prefs.page.appearance",
             Self::UiUpdate => "prefs.page.update",
             Self::PostgresConnection => "prefs.page.connection",
+            Self::PostgresFormats => "prefs.page.formats",
             Self::OracleConnection => "prefs.page.connection",
             Self::OracleOptions => "prefs.page.options",
+            Self::OracleNls => "prefs.page.nls",
             Self::OracleCompiler => "prefs.page.compiler",
             Self::OracleDebugger => "prefs.page.debugger",
             Self::OracleOutput => "prefs.page.output",
@@ -144,9 +154,10 @@ impl PreferencesPage {
     pub fn section(self) -> PreferencesSection {
         match self {
             Self::UiAppearance | Self::UiUpdate => PreferencesSection::UserInterface,
-            Self::PostgresConnection => PreferencesSection::Postgres,
+            Self::PostgresConnection | Self::PostgresFormats => PreferencesSection::Postgres,
             Self::OracleConnection
             | Self::OracleOptions
+            | Self::OracleNls
             | Self::OracleCompiler
             | Self::OracleDebugger
             | Self::OracleOutput
@@ -184,8 +195,12 @@ pub struct PreferencesState {
     pub oracle_connection: OracleConnectionForm,
     /// Draft PostgreSQL → Connection form (saved on OK).
     pub postgres_connection: PostgresConnectionForm,
+    /// Draft PostgreSQL → NLS Options form (saved on OK).
+    pub postgres_formats: PostgresFormatForm,
     /// Draft Oracle → Options form (saved on OK).
     pub oracle_options: OracleOptionsForm,
+    /// Draft Oracle → NLS Options form (saved on OK).
+    pub oracle_nls: OracleNlsForm,
     /// Draft Oracle → Compiler form (saved on OK).
     pub oracle_compiler: OracleCompilerForm,
     /// Draft Oracle → Debugger form (saved on OK).
@@ -215,7 +230,9 @@ impl PreferencesState {
             update_url: i18n::update_url(),
             oracle_connection: OracleConnectionForm::load(),
             postgres_connection: PostgresConnectionForm::load(),
+            postgres_formats: PostgresFormatForm::load(),
             oracle_options: OracleOptionsForm::load(),
+            oracle_nls: OracleNlsForm::load(),
             oracle_compiler: OracleCompilerForm::load(),
             oracle_debugger: OracleDebuggerForm::load(),
             expanded: vec![
@@ -270,8 +287,12 @@ pub enum PreferencesMessage {
     OracleConnection(OracleConnectionMessage),
     /// PostgreSQL → Connection page controls.
     PostgresConnection(PostgresConnectionMessage),
+    /// PostgreSQL → NLS Options page controls.
+    PostgresFormats(PostgresFormatMessage),
     /// Oracle → Options page controls.
     OracleOptions(OracleOptionsMessage),
+    /// Oracle → NLS Options page controls.
+    OracleNls(OracleNlsMessage),
     /// Oracle → Compiler page controls.
     OracleCompiler(OracleCompilerMessage),
     /// Oracle → Debugger page controls.
@@ -315,8 +336,16 @@ impl PreferencesState {
                 self.postgres_connection.update(message);
                 false
             }
+            PreferencesMessage::PostgresFormats(message) => {
+                self.postgres_formats.update(message);
+                false
+            }
             PreferencesMessage::OracleOptions(message) => {
                 self.oracle_options.update(message);
+                false
+            }
+            PreferencesMessage::OracleNls(message) => {
+                self.oracle_nls.update(message);
                 false
             }
             PreferencesMessage::OracleCompiler(message) => {
@@ -334,7 +363,9 @@ impl PreferencesState {
                 i18n::set_update_url(self.update_url.clone());
                 self.oracle_connection.save();
                 self.postgres_connection.save();
+                self.postgres_formats.save();
                 self.oracle_options.save();
+                self.oracle_nls.save();
                 self.oracle_compiler.save();
                 self.oracle_debugger.save();
                 true
@@ -350,10 +381,16 @@ fn preferences_page(state: &PreferencesState) -> Element<'_, PreferencesMessage>
         PreferencesPage::UiUpdate => update_page(state),
         PreferencesPage::PostgresConnection => postgres_connection_page(&state.postgres_connection)
             .map(PreferencesMessage::PostgresConnection),
+        PreferencesPage::PostgresFormats => {
+            postgres_format_page(&state.postgres_formats).map(PreferencesMessage::PostgresFormats)
+        }
         PreferencesPage::OracleConnection => oracle_connection_page(&state.oracle_connection)
             .map(PreferencesMessage::OracleConnection),
         PreferencesPage::OracleOptions => {
             oracle_options_page(&state.oracle_options).map(PreferencesMessage::OracleOptions)
+        }
+        PreferencesPage::OracleNls => {
+            oracle_nls_page(&state.oracle_nls).map(PreferencesMessage::OracleNls)
         }
         PreferencesPage::OracleCompiler => {
             oracle_compiler_page(&state.oracle_compiler).map(PreferencesMessage::OracleCompiler)

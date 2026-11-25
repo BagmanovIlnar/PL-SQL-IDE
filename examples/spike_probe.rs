@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             plsqlide::ui::parameters::Parameter::new(
                 n,
                 plsqlide::ui::parameters::ParamDataType::Oracle(
-                    plsqlide::ui::parameters::OracleType::Varchar2,
+                    plsqlide::ui::parameters::OracleType::String,
                 ),
             )
         })
@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeout_ms: Some(10_000),
         cancel: false,
         max_rows: None,
+        dbms_output: None,
     })
     .await?;
     println!(
@@ -95,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             timeout_ms: Some(10_000),
             cancel: false,
             max_rows,
+            dbms_output: None,
         })
         .await?;
         println!(

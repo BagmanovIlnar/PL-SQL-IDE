@@ -23,6 +23,9 @@ pub struct OracleSpikeRequest {
     pub cancel: bool,
     /// Server-side row cap for SELECT fetches; `None` fetches everything.
     pub max_rows: Option<usize>,
+    /// DBMS_OUTPUT buffer size for `DBMS_OUTPUT.ENABLE`; `None` leaves the
+    /// output disabled and nothing is collected after the run.
+    pub dbms_output: Option<u32>,
 }
 
 /// Result of a successful Oracle spike.
@@ -34,6 +37,8 @@ pub struct OracleSpikeResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,
     pub message: String,
+    /// DBMS_OUTPUT lines produced by the run.
+    pub notices: Vec<String>,
 }
 
 impl OracleSpikeResult {
@@ -73,6 +78,7 @@ impl OracleSpikeResult {
 ///     timeout_ms: Some(10_000),
 ///     cancel: false,
 ///     max_rows: Some(10),
+///     dbms_output: None,
 /// })
 /// .await
 /// .expect("spike");
@@ -93,6 +99,62 @@ pub(crate) fn oracle_privilege_for(connect_as: ConnectAs) -> Option<oracle::Priv
         ConnectAs::Normal => None,
         ConnectAs::Sysdba => Some(oracle::Privilege::Sysdba),
         ConnectAs::Sysoper => Some(oracle::Privilege::Sysoper),
+    }
+}
+
+/// Reads NLS_DATE_FORMAT / NLS_TIME_FORMAT / NLS_NUMERIC_CHARACTERS of the
+/// session into the global NLS Options store.
+fn capture_session_nls(connection: &oracle::Connection) {
+    let lookup = |parameter: &str| -> Option<String> {
+        let mut rows = connection
+            .query(
+                "select value from nls_session_parameters where parameter = :1",
+                &[&parameter],
+            )
+            .ok()?;
+        let row = rows.next()?.ok()?;
+        let value: String = row.get(0).ok()?;
+        Some(value.trim().to_string()).filter(|value| !value.is_empty())
+    };
+    let nls = super::oracle_nls_prefs::SessionNls {
+        date_format: lookup("NLS_DATE_FORMAT").unwrap_or_default(),
+        time_format: lookup("NLS_TIME_FORMAT").unwrap_or_default(),
+        numeric_characters: lookup("NLS_NUMERIC_CHARACTERS").unwrap_or_default(),
+    };
+    super::oracle_nls_prefs::set_session_nls(nls);
+}
+
+/// Installs the resolved NLS Options on the session: date / time / number
+/// formats the server renders values with. Best-effort — a bad mask shows
+/// up as a visible query error, not a crash.
+fn apply_nls_options(connection: &oracle::Connection) {
+    let prefs = super::oracle_nls_prefs::load();
+    let strip_quotes = |value: String| value.replace('\'', "");
+    let date = strip_quotes(super::oracle_nls_prefs::strftime_to_oracle_mask(
+        &prefs.resolved_date_format(),
+    ));
+    if !date.is_empty() {
+        let _ = connection.execute(
+            &format!("ALTER SESSION SET NLS_DATE_FORMAT = '{date}'"),
+            &[],
+        );
+    }
+    let time = strip_quotes(super::oracle_nls_prefs::strftime_to_oracle_mask(
+        &prefs.resolved_time_format(),
+    ));
+    if !time.is_empty() {
+        let _ = connection.execute(
+            &format!("ALTER SESSION SET NLS_TIME_FORMAT = '{time}'"),
+            &[],
+        );
+    }
+    let decimal = prefs.resolved_decimal_symbol();
+    let group = prefs.resolved_group_symbol();
+    if !decimal.is_empty() {
+        let _ = connection.execute(
+            &format!("ALTER SESSION SET NLS_NUMERIC_CHARACTERS = '{decimal}{group}'"),
+            &[],
+        );
     }
 }
 
@@ -129,7 +191,22 @@ fn run_oracle_spike_blocking(
 
     super::oracle_compiler_prefs::apply_to_connection(&connection)?;
 
+    // Stash the session NLS formats — the NLS Options "Oracle Format"
+    // source resolves from them (best-effort, 3 dictionary rows).
+    capture_session_nls(&connection);
+
+    // Install the NLS Options formats (ALTER SESSION): dates / times /
+    // numbers come back from the server already rendered with them.
+    // Must run AFTER capture_session_nls, or we'd capture our own override.
+    apply_nls_options(&connection);
+
     info!("oracle spike connected");
+
+    // Enable the DBMS_OUTPUT buffer for this session (best-effort) when the
+    // Output tab is on; Oracle accepts 2000..1000000 bytes.
+    if let Some(size) = request.dbms_output.map(|size| size.clamp(2000, 1_000_000)) {
+        let _ = connection.execute(&format!("BEGIN DBMS_OUTPUT.ENABLE({size}); END;"), &[]);
+    }
 
     if request.cancel {
         return cancel_long_query(&connection, started);
@@ -181,6 +258,13 @@ fn run_oracle_spike_blocking(
         fetch_query_rows(&connection, &sql, &request)?
     };
 
+    // Drain DBMS_OUTPUT lines produced by the run (best-effort); skipped
+    // entirely when the output tab is disabled.
+    let notices = match request.dbms_output {
+        Some(_) => collect_dbms_output(&connection),
+        None => Vec::new(),
+    };
+
     Ok(OracleSpikeResult {
         connected: true,
         cancelled: false,
@@ -188,7 +272,47 @@ fn run_oracle_spike_blocking(
         columns,
         rows: values,
         message,
+        notices,
     })
+}
+
+/// Drains the session's DBMS_OUTPUT buffer after a run.
+///
+/// `GET_LINE` returns `status = 1` when the buffer is empty, which ends the
+/// loop. Best-effort: any error just stops collecting.
+// ponytail: one round trip per line; switch to GET_LINES batching if
+// scripts print thousands of lines.
+fn collect_dbms_output(connection: &Connection) -> Vec<String> {
+    let mut lines = Vec::new();
+    let Ok(mut stmt) = connection
+        .statement(
+            "DECLARE l VARCHAR2(32767); s INTEGER; \
+             BEGIN DBMS_OUTPUT.GET_LINE(l, s); :line := l; :status := s; END;",
+        )
+        .build()
+    else {
+        return lines;
+    };
+    loop {
+        if stmt
+            .execute_named(&[
+                ("line", &oracle::sql_type::OracleType::Varchar2(32767)),
+                ("status", &0i32),
+            ])
+            .is_err()
+        {
+            break;
+        }
+        let Ok(status) = stmt.bind_value::<&str, i32>("status") else {
+            break;
+        };
+        if status != 0 {
+            break;
+        }
+        let line: Option<String> = stmt.bind_value("line").unwrap_or(None);
+        lines.push(line.unwrap_or_default());
+    }
+    lines
 }
 
 /// Run a SELECT and collect up to the row cap, dropping the paging helper
@@ -284,6 +408,7 @@ fn cancel_long_query(
         elapsed_ms: started.elapsed().as_millis() as u64,
         columns: Vec::new(),
         rows: Vec::new(),
+        notices: Vec::new(),
         message: if cancelled {
             "long query cancelled successfully".into()
         } else {

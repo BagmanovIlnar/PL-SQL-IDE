@@ -11,6 +11,8 @@ use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key, Modifiers};
 use iced::mouse;
 use iced::widget::operation::focus as focus_widget;
+use iced::widget::operation::{scroll_to, AbsoluteOffset};
+use iced::widget::text::Wrapping;
 use iced::widget::text_editor::{Action, Binding, Content, Edit, Motion};
 use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, row, rule, scrollable,
@@ -28,6 +30,8 @@ use iced_fonts::LUCIDE_FONT_BYTES;
 /// Stable widget id so the editor can keep / regain keyboard focus while the
 /// completion overlay is visible.
 const EDITOR_ID: &str = "worksheet-editor";
+/// Horizontal scrollable wrapping the no-wrap editor content.
+const EDITOR_HSCROLL: &str = "editor-hscroll";
 
 /// Editor font size in logical pixels (shared by text and line gutter).
 const EDITOR_TEXT_SIZE: f32 = 14.0;
@@ -160,6 +164,19 @@ enum BottomTab {
     Variables,
 }
 
+/// Test window tabsheet tab (PL/SQL Developer style): the whole working area
+/// is one tab control, the anonymous-block editor lives in the first tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestTab {
+    /// Test script — the editor plus the parameters grid.
+    Script,
+    /// DBMS Output (Oracle) / RAISE NOTICE (Postgres) lines.
+    Output,
+    Statistics,
+    Profiler,
+    Trace,
+}
+
 /// Structured outcome of a spike run: text for output plus grid data.
 #[derive(Debug, Clone)]
 struct SpikePayload {
@@ -167,8 +184,10 @@ struct SpikePayload {
     output: String,
     columns: Vec<String>,
     rows: Vec<Vec<String>>,
-    /// Postgres RAISE NOTICE lines; Oracle DBMS_OUTPUT later.
+    /// RAISE NOTICE (Postgres) / DBMS_OUTPUT (Oracle) lines.
     notices: Vec<String>,
+    /// Server-side execution time of the run.
+    elapsed_ms: u64,
 }
 
 #[derive(Debug)]
@@ -206,6 +225,14 @@ struct Worksheet {
     command_input: String,
     /// Command window: last executed command (repeated by `/`).
     command_last: String,
+    /// DBMS_OUTPUT (Oracle) / RAISE NOTICE (Postgres) lines of the last run.
+    notices: Vec<String>,
+    /// Statistics lines of the last Test-window run.
+    stats: Vec<String>,
+    /// DBMS Output tab: collect server output after a run.
+    dbms_output_enabled: bool,
+    /// DBMS Output tab: DBMS_OUTPUT.ENABLE buffer size (digits only).
+    dbms_output_buffer: String,
 }
 
 impl Worksheet {
@@ -220,6 +247,15 @@ impl Worksheet {
             format!("{name} *")
         } else {
             name
+        }
+    }
+
+    /// DBMS_OUTPUT.ENABLE buffer size for a run; `None` — collection off.
+    fn dbms_output_size(&self) -> Option<u32> {
+        if self.dbms_output_enabled {
+            Some(self.dbms_output_buffer.parse().unwrap_or(10_000))
+        } else {
+            None
         }
     }
 
@@ -455,6 +491,8 @@ struct App {
     spike_run: u64,
     /// Active tab of the bottom panel (Parameters / Results).
     bottom_tab: BottomTab,
+    /// Active tab of the Test window tabsheet.
+    test_tab: TestTab,
     metrics: String,
     last_output: String,
     selected_node: Option<BrowserNode>,
@@ -653,6 +691,14 @@ enum Message {
     PostFinished(u64, Result<String, String>),
     /// Switch the bottom panel between Parameters and Results.
     BottomTab(BottomTab),
+    /// Switch the Test window tabsheet (Test script / DBMS Output / …).
+    TestTab(TestTab),
+    /// DBMS Output tab: enabled checkbox.
+    DbmsOutputEnabled(bool),
+    /// DBMS Output tab: buffer size field (digits only).
+    DbmsOutputBuffer(String),
+    /// DBMS Output tab: Clear button.
+    ClearDbmsOutput,
     /// Result-grid interactions (edit mode, cell edits, fetch, post).
     Grid(ResultMessage),
     /// Begin dragging a panel resize border.
@@ -711,6 +757,7 @@ impl App {
             busy: false,
             spike_run: 0,
             bottom_tab: BottomTab::Parameters,
+            test_tab: TestTab::Script,
             metrics: i18n::t("status.ready"),
             last_output: String::new(),
             selected_node: None,
@@ -823,6 +870,10 @@ impl App {
             command_paused: false,
             command_input: String::new(),
             command_last: String::new(),
+            notices: Vec::new(),
+            stats: Vec::new(),
+            dbms_output_enabled: true,
+            dbms_output_buffer: "10000".to_string(),
         });
         self.active_tab = self.worksheets.len() - 1;
         self.completion.clear();
@@ -1080,7 +1131,12 @@ impl App {
             ParamMessage::TypeChanged(index, data_type) => {
                 if let Some(panel) = self.active_parameters_mut() {
                     if let Some(row) = panel.rows.get_mut(index) {
+                        // Coerce the value to the new type so the panel never
+                        // holds an impossible value (PL/SQL Developer does the
+                        // same on a Type switch).
+                        let coerced = data_type.coerce_value(&row.value);
                         row.data_type = data_type;
+                        row.value = coerced;
                     }
                     panel.select(index);
                 }
@@ -1088,7 +1144,8 @@ impl App {
             ParamMessage::ValueChanged(index, value) => {
                 if let Some(panel) = self.active_parameters_mut() {
                     if let Some(row) = panel.rows.get_mut(index) {
-                        row.value = value;
+                        // The field only accepts characters its type parses.
+                        row.value = row.data_type.coerce_value(&value);
                     }
                 }
             }
@@ -1363,6 +1420,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             }
 
             let marks_dirty = matches!(action, Action::Edit(_));
+            let is_scroll = matches!(action, Action::Scroll { .. });
             let mut restored_empty = false;
             if let Some(content) = app.active_content_mut() {
                 content.perform(action);
@@ -1385,13 +1443,26 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
             app.refresh_completion();
+            // Horizontal caret follow: the no-wrap editor lives in a horizontal
+            // scrollable; keep the caret column in view after edits/moves.
+            let mut tasks = Vec::new();
+            if !is_scroll {
+                if let Some(sheet) = app.worksheets.get(app.active_tab) {
+                    let caret_x = sheet.content.cursor().position.column as f32 * EDITOR_CHAR_W
+                        + EDITOR_PADDING;
+                    let vp = app.editor_viewport.get();
+                    let gutter = gutter_width(sheet.content.line_count().max(1));
+                    let visible_w = (vp.width - gutter - SCROLLBAR_W).max(0.0);
+                    let x = h_follow_offset(caret_x, visible_w);
+                    tasks.push(scroll_to(EDITOR_HSCROLL, AbsoluteOffset { x, y: 0.0 }));
+                }
+            }
             // Keep keyboard focus when the completion overlay appears or content
             // was rebuilt after a full clear.
             if restored_empty || !app.completion.is_empty() {
-                focus_widget(EDITOR_ID)
-            } else {
-                Task::none()
+                tasks.push(focus_widget(EDITOR_ID));
             }
+            Task::batch(tasks)
         }
         Message::FilterChanged(value) => {
             app.filter = value;
@@ -2255,6 +2326,21 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                                 }
                             }
                         }
+                        // Test/SQL windows: fill the DBMS Output / RAISE and
+                        // Statistics tabs of the work-area tabsheet. The tab
+                        // does not switch on its own — the user picks it.
+                        if matches!(sheet.kind, WindowKind::Test | WindowKind::Sql) {
+                            // Output tab disabled — keep the tab empty.
+                            sheet.notices = if sheet.dbms_output_enabled {
+                                payload.notices.clone()
+                            } else {
+                                Vec::new()
+                            };
+                            sheet.stats = vec![
+                                format!("{}: {} ms", i18n::t("stats.elapsed"), payload.elapsed_ms),
+                                format!("{}: {}", i18n::t("stats.rows"), payload.rows.len()),
+                            ];
+                        }
                         match mode {
                             FetchMode::Execute => {
                                 if !payload.columns.is_empty() {
@@ -2359,6 +2445,29 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::BottomTab(tab) => {
             app.bottom_tab = tab;
+            Task::none()
+        }
+        Message::TestTab(tab) => {
+            app.test_tab = tab;
+            Task::none()
+        }
+        Message::DbmsOutputEnabled(enabled) => {
+            if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                sheet.dbms_output_enabled = enabled;
+            }
+            Task::none()
+        }
+        Message::DbmsOutputBuffer(value) => {
+            // Numeric field: keep digits only.
+            if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                sheet.dbms_output_buffer = value.chars().filter(|c| c.is_ascii_digit()).collect();
+            }
+            Task::none()
+        }
+        Message::ClearDbmsOutput => {
+            if let Some(sheet) = app.worksheets.get_mut(app.active_tab) {
+                sheet.notices.clear();
+            }
             Task::none()
         }
         Message::Grid(message) => handle_grid_message(app, message),
@@ -2628,6 +2737,7 @@ fn run_connect(app: &mut App) -> Task<Message> {
                     timeout_ms: Some(10_000),
                     cancel: false,
                     max_rows: Some(10),
+                    dbms_output: None,
                 };
                 Task::perform(
                     async move {
@@ -2902,20 +3012,23 @@ fn run_spike_with_sql(
         }
     }
     // Test window: discover `:NAME` binds, auto-fill the parameters panel,
-    // and wrap the block so panel values bind IN and OUT values come back.
-    let sql = if profile.db_kind == DbKind::Oracle
-        && app
-            .worksheets
-            .get(app.active_tab)
-            .map(|sheet| sheet.kind == WindowKind::Test)
-            .unwrap_or(false)
+    // and bind the panel values — Oracle wraps the block into PL/SQL
+    // variables (IN values in, OUT values back through :PLSQLIDE_OUT);
+    // Postgres substitutes typed literals textually (no named binds).
+    let sql = if app
+        .worksheets
+        .get(app.active_tab)
+        .map(|sheet| sheet.kind == WindowKind::Test)
+        .unwrap_or(false)
     {
         sql.map(|text| {
             let params = auto_fill_bind_params(app, &text);
             if params.is_empty() {
                 text
-            } else {
+            } else if profile.db_kind == DbKind::Oracle {
                 crate::ui::parameters::bind_wrap(&text, &params, true).0
+            } else {
+                crate::ui::parameters::bind_substitute_pg(&text, &params)
             }
         })
     } else {
@@ -2935,6 +3048,11 @@ fn run_spike_with_sql(
     });
     tracing::info!(sql = sql.as_deref().unwrap_or(""), "paging sql prepared");
     app.fetch_mode = mode;
+    // DBMS Output tab settings ride along with the run (Oracle ENABLE/GET).
+    let dbms_output = app
+        .worksheets
+        .get(app.active_tab)
+        .and_then(|sheet| sheet.dbms_output_size());
 
     match profile.db_kind {
         DbKind::Postgres => {
@@ -2957,6 +3075,7 @@ fn run_spike_with_sql(
                                 columns: result.columns,
                                 rows: result.rows,
                                 notices: result.notices,
+                                elapsed_ms: result.elapsed_ms,
                             }
                         })
                         .map_err(|err| err.to_string())
@@ -2977,6 +3096,7 @@ fn run_spike_with_sql(
                     timeout_ms: Some(10_000),
                     cancel: false,
                     max_rows: None,
+                    dbms_output,
                 };
                 Task::perform(
                     async move {
@@ -2989,7 +3109,8 @@ fn run_spike_with_sql(
                                     output,
                                     columns: result.columns,
                                     rows: result.rows,
-                                    notices: Vec::new(),
+                                    notices: result.notices,
+                                    elapsed_ms: result.elapsed_ms,
                                 }
                             })
                             .map_err(|err| err.to_string())
@@ -3201,6 +3322,7 @@ fn run_result_post(app: &mut App) -> Task<Message> {
                     timeout_ms: Some(10_000),
                     cancel: false,
                     max_rows: None,
+                    dbms_output: None,
                 };
                 Task::perform(
                     async move {
@@ -5121,14 +5243,28 @@ mod row_offsets_tests {
     fn wraps_long_lines_into_multiple_rows() {
         // 80-char line at 40 cols = 2 rows; short line = 1 row.
         let content = Content::with_text(&format!("{}\nshort", "x".repeat(80)));
-        let offsets = row_offsets(&content, 40);
+        let offsets = row_offsets(&content, Some(40));
         assert_eq!(offsets, vec![0.0, 40.0, 60.0]);
     }
 
     #[test]
     fn empty_content_is_one_row() {
-        let offsets = row_offsets(&Content::new(), 40);
+        let offsets = row_offsets(&Content::new(), Some(40));
         assert_eq!(offsets, vec![0.0, 20.0]);
+    }
+
+    #[test]
+    fn no_wrap_is_one_row_per_line() {
+        let content = Content::with_text(&format!("{}\nshort", "x".repeat(200)));
+        assert_eq!(row_offsets(&content, None), vec![0.0, 20.0, 40.0]);
+    }
+
+    #[test]
+    fn caret_follow_pins_to_right_margin() {
+        // fits with margin -> no scroll
+        assert_eq!(h_follow_offset(50.0, 200.0), 0.0);
+        // beyond the margin -> caret pinned ~4 chars from the right edge
+        assert_eq!(h_follow_offset(300.0, 200.0), 300.0 - 200.0 + 4.0 * 8.4);
     }
 }
 
@@ -5155,12 +5291,6 @@ mod completion_popup_origin_tests {
         let (top_b, _) = completion_popup_origin(5.0, 0.0, 100.0, 5);
         assert!((top_a - top_b - 100.0).abs() < 0.01);
     }
-}
-
-fn toolbar_divider() -> Element<'static, Message> {
-    container(rule::vertical(1).style(|_| rule_style()))
-        .height(22)
-        .into()
 }
 
 /// Small icon toolbar button with tooltip; disabled when `enabled` is false.
@@ -5314,20 +5444,35 @@ fn line_number_gutter(
     .into()
 }
 
-/// Pixel offset of every logical line (index 0 = 0.0), assuming `wrap_cols`
-/// glyphs per visual row. Approximates the editor's soft wrap; shared by the
-/// gutter and the scrollbar so both stay consistent.
+/// Pixel offset of every logical line (index 0 = 0.0). `wrap_cols = Some(n)`
+/// estimates soft wrap at `n` columns; `None` — one row per line (no wrap).
 /// ponytail: glyph-count estimate ignores word-wrap waste; if numbers drift
 /// from long lines, tune EDITOR_CHAR_W (iced 0.14 exposes no real geometry).
-fn row_offsets(content: &Content, wrap_cols: usize) -> Vec<f32> {
+fn row_offsets(content: &Content, wrap_cols: Option<usize>) -> Vec<f32> {
     let mut offsets = Vec::with_capacity(content.line_count() + 1);
     offsets.push(0.0);
     for line in content.lines() {
-        let chars = line.text.chars().count().max(1) as f32;
-        let rows = (chars / wrap_cols as f32).ceil();
+        let rows = match wrap_cols {
+            Some(cols) => {
+                let chars = line.text.chars().count().max(1) as f32;
+                (chars / cols as f32).ceil()
+            }
+            None => 1.0,
+        };
         offsets.push(offsets.last().unwrap_or(&0.0) + rows * EDITOR_LINE_HEIGHT);
     }
     offsets
+}
+
+/// Horizontal offset that keeps the caret (`caret_x`) inside `visible_w`:
+/// 0 while it fits with a right margin, else the caret pinned to the margin.
+fn h_follow_offset(caret_x: f32, visible_w: f32) -> f32 {
+    const MARGIN: f32 = 4.0 * EDITOR_CHAR_W;
+    if caret_x < visible_w - MARGIN {
+        0.0
+    } else {
+        (caret_x - visible_w + MARGIN).max(0.0)
+    }
 }
 
 /// (thumb height, scrollable content height) of the editor scrollbar.
@@ -5431,11 +5576,19 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
     let editor_body = Responsive::new(move |vp| {
         let gutter_w = gutter_width(line_count);
         let editor_w = vp.width - gutter_w - SCROLLBAR_W;
-        let wrap_cols =
-            (((editor_w - 2.0 * EDITOR_PADDING) / EDITOR_CHAR_W).floor() as usize).max(8);
-        // Per-line pixel offsets under the estimated soft wrap — single source
-        // of truth for gutter alignment and the scrollbar thumb.
-        let offsets = row_offsets(&sheet.content, wrap_cols);
+        // No soft wrap: one row per logical line; the editor is sized to its
+        // longest line and the horizontal scrollable brings the rest in view.
+        // +1 char of slack so a slightly wider glyph run is never clipped.
+        let offsets = row_offsets(&sheet.content, None);
+        let content_cols = sheet
+            .content
+            .lines()
+            .map(|line| line.text.chars().count())
+            .max()
+            .unwrap_or(0);
+        let content_w =
+            (content_cols as f32 * EDITOR_CHAR_W + 2.0 * EDITOR_CHAR_W + 2.0 * EDITOR_PADDING)
+                .max(editor_w);
         let content_h = offsets.last().copied().unwrap_or(0.0) + 2.0 * EDITOR_PADDING;
         let max_scroll = (content_h - vp.height).max(0.0);
         viewport_cell.set(vp);
@@ -5450,6 +5603,7 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
                 EDITOR_LINE_HEIGHT.into(),
             ))
             .padding(EDITOR_PADDING)
+            .wrapping(Wrapping::None)
             .highlight(syntax, highlighter_theme)
             .style(|_, status| editor_style(status))
             .key_binding(move |key_press| {
@@ -5482,13 +5636,23 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
                 breakpoints,
                 current_line
             ),
-            container(editor)
+            container(
+                scrollable(container(editor).width(content_w).height(Fill).style(|_| {
+                    container::Style {
+                        background: Some(Background::Color(ui_theme::current().panel_bg)),
+                        ..container::Style::default()
+                    }
+                }),)
+                .id(EDITOR_HSCROLL)
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::new()
+                        .width(SCROLLBAR_W)
+                        .scroller_width(5.0),
+                ))
                 .width(Fill)
                 .height(Fill)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(ui_theme::current().panel_bg)),
-                    ..container::Style::default()
-                }),
+                .style(|_, _| plain_scroll_style()),
+            ),
             editor_scrollbar(scroll_y, max_scroll, vp.height),
         ]
         .height(Fill)
@@ -5597,6 +5761,13 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .height(Fill);
 
+    // Test window: the whole working area is one tabsheet — Test script (the
+    // anonymous-block editor + parameters grid), DBMS Output / RAISE,
+    // Statistics, Profiler, Trace.
+    if sheet.kind == WindowKind::Test {
+        return test_pane(app, sheet, editor_stack.into());
+    }
+
     let editor: Element<'_, Message> = if sheet.kind.shows_parameters() {
         let db_kind = sheet
             .connection_id
@@ -5621,7 +5792,6 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
             BottomTab::Parameters => {
                 parameters_view(&sheet.parameters, db_kind, app.parameters_height)
                     .map(Message::Param)
-                    .into()
             }
             BottomTab::Stack => {
                 let lines = if app.debug_session.active {
@@ -5635,13 +5805,13 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
                 } else {
                     Vec::new()
                 };
-                debug_list_view(lines, app.parameters_height).into()
+                debug_list_view(lines, app.parameters_height, "debug.list_empty")
             }
             BottomTab::Variables => {
-                debug_vars_view(app.debug_session.variables.clone(), app.parameters_height).into()
+                debug_vars_view(app.debug_session.variables.clone(), app.parameters_height)
             }
         };
-        column![
+        let sql_tab: Element<'_, Message> = column![
             editor_stack,
             horizontal_resize_handle(),
             panel_tab_strip(show_result_tab, tab),
@@ -5650,7 +5820,10 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
         .spacing(0)
         .width(Fill)
         .height(Fill)
-        .into()
+        .into();
+        // SQL window: the working area is a tabsheet — SQL (editor + result /
+        // parameters panel), DBMS Output (Oracle) / RAISE (Postgres), Statistics.
+        sql_pane(app, sheet, db_kind, sql_tab)
     } else {
         editor_stack.into()
     };
@@ -5658,6 +5831,156 @@ fn editor_pane(app: &App) -> Element<'_, Message> {
         return command_pane(app, editor);
     }
     editor
+}
+
+/// Test window working area — a PL/SQL Developer-style tabsheet: Test script
+/// (anonymous-block editor + parameters grid), DBMS Output (Oracle) / RAISE
+/// (Postgres), Statistics, Profiler and Trace.
+fn test_pane<'a>(
+    app: &App,
+    sheet: &'a Worksheet,
+    editor_stack: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let db_kind = sheet
+        .connection_id
+        .and_then(|id| app.connections.iter().find(|profile| profile.id == id))
+        .map(|profile| profile.db_kind)
+        .unwrap_or(DbKind::Postgres);
+    // Inner bottom panel of the Test script tab (Result is SQL-window only).
+    let tab = match app.bottom_tab {
+        BottomTab::Result => BottomTab::Parameters,
+        tab => tab,
+    };
+    let panel: Element<'a, Message> = match tab {
+        BottomTab::Parameters | BottomTab::Result => {
+            parameters_view(&sheet.parameters, db_kind, app.parameters_height).map(Message::Param)
+        }
+        BottomTab::Stack => {
+            let lines = if app.debug_session.active {
+                match app.debug_session.current_line {
+                    Some(line) => vec![i18n::t_args(
+                        "debug.stack_frame",
+                        &[("line", &line.to_string())],
+                    )],
+                    None => vec![i18n::t("debug.stack_running")],
+                }
+            } else {
+                Vec::new()
+            };
+            debug_list_view(lines, app.parameters_height, "debug.list_empty")
+        }
+        BottomTab::Variables => {
+            debug_vars_view(app.debug_session.variables.clone(), app.parameters_height)
+        }
+    };
+    let script_tab = column![
+        editor_stack,
+        horizontal_resize_handle(),
+        panel_tab_strip(false, tab),
+        panel,
+    ]
+    .spacing(0)
+    .width(Fill)
+    .height(Fill);
+    let content: Element<'a, Message> = match app.test_tab {
+        TestTab::Script => script_tab.into(),
+        TestTab::Output => dbms_output_view(sheet),
+        TestTab::Statistics => debug_list_view(sheet.stats.clone(), Fill, "test.stats_empty"),
+        // ponytail: placeholders until dbms_profiler / SQL trace collection
+        // is wired; the tabs exist so the layout matches PL/SQL Developer.
+        TestTab::Profiler => debug_list_view(Vec::new(), Fill, "panel.profiler_empty"),
+        TestTab::Trace => debug_list_view(Vec::new(), Fill, "panel.trace_empty"),
+    };
+    column![test_tab_strip(db_kind, app.test_tab), content]
+        .spacing(0)
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+/// DBMS Output / RAISE tab: Enabled checkbox, buffer size field, Clear
+/// button and the output text area — the PL/SQL Developer panel layout.
+/// The settings gate collection on every run (Oracle ENABLE + GET, Postgres
+/// notices) and are honored by both the SQL and Test windows.
+fn dbms_output_view<'a>(sheet: &'a Worksheet) -> Element<'a, Message> {
+    let controls = row![
+        checkbox(sheet.dbms_output_enabled)
+            .label(i18n::t("panel.dbms_enabled"))
+            .size(13)
+            .text_size(12)
+            .on_toggle(Message::DbmsOutputEnabled),
+        text(i18n::t("panel.dbms_buffer_size"))
+            .size(12)
+            .color(ui_theme::current().muted),
+        text_input("10000", sheet.dbms_output_buffer.as_str())
+            .size(12)
+            .width(90)
+            .on_input(Message::DbmsOutputBuffer),
+        button(text(i18n::t("panel.dbms_clear")).size(12))
+            .padding(Padding::from([4, 10]))
+            .style(|_, status| ui_theme::chrome_button(status))
+            .on_press(Message::ClearDbmsOutput),
+    ]
+    .spacing(10)
+    .padding(Padding::from([6, 8]))
+    .align_y(Vertical::Center);
+
+    // Поле вывода на всю рабочую область: фон + рамка как у редактора.
+    let body: Element<'a, Message> = container(
+        scrollable(
+            text(sheet.notices.join("\n"))
+                .size(12)
+                .font(Font::MONOSPACE),
+        )
+        .width(Fill)
+        .height(Fill),
+    )
+    .padding(4)
+    .width(Fill)
+    .height(Fill)
+    .style(|_| container::Style {
+        background: Some(Background::Color(ui_theme::current().panel_bg)),
+        text_color: Some(ui_theme::current().text),
+        border: Border {
+            color: ui_theme::current().border,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
+    })
+    .into();
+
+    column![controls, body]
+        .spacing(0)
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+/// SQL window working area — a PL/SQL Developer-style tabsheet: SQL (editor,
+/// result grid and parameters panel), DBMS Output (Oracle) / RAISE (Postgres)
+/// and Statistics, filled like the Test window.
+fn sql_pane<'a>(
+    app: &App,
+    sheet: &'a Worksheet,
+    db_kind: DbKind,
+    sql_tab: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let content: Element<'_, Message> = match app.test_tab {
+        TestTab::Output => dbms_output_view(sheet),
+        TestTab::Statistics => debug_list_view(sheet.stats.clone(), Fill, "test.stats_empty"),
+        // The SQL window has no Profiler/Trace tabs — clamp to the editor tab.
+        _ => sql_tab,
+    };
+    let tab = match app.test_tab {
+        TestTab::Output | TestTab::Statistics => app.test_tab,
+        _ => TestTab::Script,
+    };
+    column![sql_tab_strip(db_kind, tab), content]
+        .spacing(0)
+        .width(Fill)
+        .height(Fill)
+        .into()
 }
 
 /// Console banner shown at the top of an empty Command-window dialog.
@@ -6071,11 +6394,15 @@ fn command_pane<'a>(app: &'a App, editor: Element<'a, Message>) -> Element<'a, M
 }
 
 /// Monospace list used by the Stack and Variables tabs of the debug panel.
-fn debug_list_view(lines: Vec<String>, height: f32) -> Element<'static, Message> {
+fn debug_list_view(
+    lines: Vec<String>,
+    height: impl Into<iced::Length>,
+    empty_key: &str,
+) -> Element<'static, Message> {
     if lines.is_empty() {
         return container(
             scrollable(
-                text(i18n::t("debug.list_empty"))
+                text(i18n::t(empty_key))
                     .size(12)
                     .color(ui_theme::current().muted),
             )
@@ -6242,19 +6569,84 @@ fn panel_tab_strip(show_result: bool, active: BottomTab) -> Element<'static, Mes
 }
 
 fn panel_tab(label: String, tab: BottomTab, active: BottomTab) -> Element<'static, Message> {
-    let selected = tab == active;
+    tab_button(label, tab, tab == active, Message::BottomTab)
+}
+
+fn test_tab(label: String, tab: TestTab, active: TestTab) -> Element<'static, Message> {
+    tab_button(label, tab, tab == active, Message::TestTab)
+}
+
+/// Shared tab-strip button (bottom panel and Test window tabsheet).
+fn tab_button<T>(
+    label: String,
+    tab: T,
+    active: bool,
+    message: impl Fn(T) -> Message,
+) -> Element<'static, Message> {
     button(text(label).size(11))
         .padding(Padding::from([2, 10]))
         .style(move |_, status| {
             let mut style = ui_theme::chrome_button(status);
-            if selected {
+            if active {
                 style.background = Some(Background::Color(ui_theme::current().accent));
                 style.text_color = Color::WHITE;
             }
             style
         })
-        .on_press(Message::BottomTab(tab))
+        .on_press(message(tab))
         .into()
+}
+
+/// Output tab label: DBMS Output on Oracle, RAISE (NOTICE) on PostgreSQL.
+fn output_tab_label(db_kind: DbKind) -> String {
+    if db_kind == DbKind::Oracle {
+        i18n::t("panel.dbms_output")
+    } else {
+        i18n::t("panel.raise")
+    }
+}
+
+/// Tab strip of the SQL window tabsheet: SQL, Output, Statistics.
+fn sql_tab_strip(db_kind: DbKind, active: TestTab) -> Element<'static, Message> {
+    row![]
+        .spacing(4)
+        .padding(Padding::from([2, 8]))
+        .align_y(Vertical::Center)
+        .push(test_tab("SQL".to_string(), TestTab::Script, active))
+        .push(test_tab(output_tab_label(db_kind), TestTab::Output, active))
+        .push(test_tab(
+            i18n::t("panel.statistics"),
+            TestTab::Statistics,
+            active,
+        ))
+        .into()
+}
+
+/// Tab strip of the Test window tabsheet; the output tab is DBMS Output on
+/// Oracle and RAISE (NOTICE) on PostgreSQL.
+fn test_tab_strip(db_kind: DbKind, active: TestTab) -> Element<'static, Message> {
+    let mut strip = row![]
+        .spacing(4)
+        .padding(Padding::from([2, 8]))
+        .align_y(Vertical::Center);
+    strip = strip.push(test_tab(
+        i18n::t("panel.test_script"),
+        TestTab::Script,
+        active,
+    ));
+    strip = strip.push(test_tab(output_tab_label(db_kind), TestTab::Output, active));
+    strip = strip.push(test_tab(
+        i18n::t("panel.statistics"),
+        TestTab::Statistics,
+        active,
+    ));
+    strip = strip.push(test_tab(
+        i18n::t("panel.profiler"),
+        TestTab::Profiler,
+        active,
+    ));
+    strip = strip.push(test_tab(i18n::t("panel.trace"), TestTab::Trace, active));
+    strip.into()
 }
 
 fn status_bar(app: &App) -> Element<'_, Message> {
@@ -6666,6 +7058,7 @@ mod command_dialog_tests {
                         columns: vec![value.to_string()],
                         rows: vec![vec![value.to_string()]],
                         notices: Vec::new(),
+                        elapsed_ms: 0,
                     }),
                 ),
             );
@@ -6736,6 +7129,146 @@ mod tests {
 }
 
 #[cfg(test)]
+mod test_window_tests {
+    use super::*;
+
+    /// A finished Test-window run fills the DBMS Output / RAISE and
+    /// Statistics tabs and jumps to the output tab when there is output.
+    #[test]
+    fn run_fills_output_and_statistics_tabs() {
+        let mut app = App::new();
+        app.open_window(WindowKind::Test);
+        let run_id = app.spike_run;
+        let _ = update(
+            &mut app,
+            Message::SpikeFinished(
+                run_id,
+                Ok(SpikePayload {
+                    sql: String::new(),
+                    output: "ok".to_string(),
+                    columns: Vec::new(),
+                    rows: vec![vec!["x".to_string()]],
+                    notices: vec!["hello".to_string()],
+                    elapsed_ms: 7,
+                }),
+            ),
+        );
+        let sheet = &app.worksheets[app.active_tab];
+        assert_eq!(sheet.notices, vec!["hello".to_string()]);
+        assert!(sheet.stats.iter().any(|line| line.contains("7")));
+        // Tabs fill but the tabsheet never switches on its own.
+        assert_eq!(app.test_tab, TestTab::Script);
+        let _ = update(&mut app, Message::TestTab(TestTab::Output));
+        assert_eq!(app.test_tab, TestTab::Output);
+        let _ = update(&mut app, Message::TestTab(TestTab::Script));
+        assert_eq!(app.test_tab, TestTab::Script);
+    }
+
+    /// A finished SQL-window run fills the Output / Statistics tabs too and
+    /// jumps to the output tab when the script printed something.
+    #[test]
+    fn sql_run_fills_output_and_statistics_tabs() {
+        let mut app = App::new();
+        app.open_window(WindowKind::Sql);
+        let run_id = app.spike_run;
+        let _ = update(
+            &mut app,
+            Message::SpikeFinished(
+                run_id,
+                Ok(SpikePayload {
+                    sql: "select 1".to_string(),
+                    output: "ok".to_string(),
+                    columns: vec!["1".to_string()],
+                    rows: vec![vec!["1".to_string()]],
+                    notices: vec!["n1".to_string()],
+                    elapsed_ms: 3,
+                }),
+            ),
+        );
+        let sheet = &app.worksheets[app.active_tab];
+        assert_eq!(sheet.notices, vec!["n1".to_string()]);
+        assert!(sheet.stats.iter().any(|line| line.contains("3")));
+        assert_eq!(app.test_tab, TestTab::Script);
+    }
+
+    /// DBMS Output tab controls: the buffer field keeps digits only, a
+    /// disabled tab collects nothing, Clear empties the lines.
+    #[test]
+    fn dbms_output_controls() {
+        let mut app = App::new();
+        app.open_window(WindowKind::Sql);
+        let _ = update(&mut app, Message::DbmsOutputBuffer("12x7".to_string()));
+        assert_eq!(app.worksheets[app.active_tab].dbms_output_buffer, "127");
+        assert_eq!(app.worksheets[app.active_tab].dbms_output_size(), Some(127));
+
+        let _ = update(&mut app, Message::DbmsOutputEnabled(false));
+        let run_id = app.spike_run;
+        let _ = update(
+            &mut app,
+            Message::SpikeFinished(
+                run_id,
+                Ok(SpikePayload {
+                    sql: String::new(),
+                    output: "ok".to_string(),
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    notices: vec!["n".to_string()],
+                    elapsed_ms: 1,
+                }),
+            ),
+        );
+        assert!(app.worksheets[app.active_tab].notices.is_empty());
+
+        let _ = update(&mut app, Message::DbmsOutputEnabled(true));
+        let _ = update(
+            &mut app,
+            Message::SpikeFinished(
+                run_id,
+                Ok(SpikePayload {
+                    sql: String::new(),
+                    output: "ok".to_string(),
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    notices: vec!["n".to_string()],
+                    elapsed_ms: 1,
+                }),
+            ),
+        );
+        assert_eq!(
+            app.worksheets[app.active_tab].notices,
+            vec!["n".to_string()]
+        );
+
+        let _ = update(&mut app, Message::ClearDbmsOutput);
+        assert!(app.worksheets[app.active_tab].notices.is_empty());
+    }
+
+    /// A run without output keeps the tabsheet on the script tab.
+    #[test]
+    fn run_without_output_stays_on_script() {
+        let mut app = App::new();
+        app.open_window(WindowKind::Test);
+        let run_id = app.spike_run;
+        let _ = update(
+            &mut app,
+            Message::SpikeFinished(
+                run_id,
+                Ok(SpikePayload {
+                    sql: String::new(),
+                    output: "ok".to_string(),
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    notices: Vec::new(),
+                    elapsed_ms: 0,
+                }),
+            ),
+        );
+        assert_eq!(app.test_tab, TestTab::Script);
+        assert_eq!(app.worksheets[app.active_tab].stats.len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod console_queue_tests {
     use super::*;
 
@@ -6778,6 +7311,7 @@ mod console_queue_tests {
                     columns: vec!["1".to_string()],
                     rows: vec![vec!["1".to_string()]],
                     notices: Vec::new(),
+                    elapsed_ms: 0,
                 }),
             ),
         );

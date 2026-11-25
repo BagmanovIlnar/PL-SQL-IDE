@@ -48,7 +48,7 @@ END;";
             plsqlide::ui::parameters::Parameter::new(
                 n,
                 plsqlide::ui::parameters::ParamDataType::Oracle(
-                    plsqlide::ui::parameters::OracleType::Varchar2,
+                    plsqlide::ui::parameters::OracleType::String,
                 ),
             )
         })

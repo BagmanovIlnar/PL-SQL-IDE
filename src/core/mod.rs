@@ -14,9 +14,11 @@ pub mod oracle_compiler_prefs;
 pub mod oracle_connection_prefs;
 pub mod oracle_debug;
 pub mod oracle_debugger_prefs;
+pub mod oracle_nls_prefs;
 pub mod oracle_options_prefs;
 pub mod oracle_pool;
 pub mod postgres_connection_prefs;
+pub mod postgres_format_prefs;
 pub mod postgres_spike;
 
 #[cfg(feature = "oracle")]

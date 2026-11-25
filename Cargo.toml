@@ -57,6 +57,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+libc = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 oracle = { version = "0.6", optional = true }
 directories = "6"
